@@ -23,7 +23,8 @@ namespace TLogReaderV5
 				string[] stringSeparators = new string[] {"."};
 				string[] tmpStr = inputFileName.Split(stringSeparators, StringSplitOptions.None);
 				int inLen = inputFileName.Length;
-				if (String.Equals("tlog",tmpStr[1])) {
+				int tmpStrLen = tmpStr.Length;
+				if (String.Equals("tlog",tmpStr[tmpStrLen-1])) {
 //				if ((String.Equals (inputFileName [inLen - 5], '.')) & 
 //					(String.Equals (inputFileName [inLen - 4], 't')) & 
 //					(String.Equals (inputFileName [inLen - 3], 'l')) & 

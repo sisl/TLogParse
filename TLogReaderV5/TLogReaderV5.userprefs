@@ -1,8 +1,8 @@
 ﻿<Properties>
   <MonoDevelop.Ide.Workspace ActiveConfiguration="Debug|x86" />
-  <MonoDevelop.Ide.Workbench ActiveDocument="TLogUtils.cs">
+  <MonoDevelop.Ide.Workbench ActiveDocument="Program.cs">
     <Files>
-      <File FileName="Program.cs" Line="52" Column="15" />
+      <File FileName="Program.cs" Line="24" Column="58" />
       <File FileName="TLogUtils.cs" Line="176" Column="36" />
     </Files>
   </MonoDevelop.Ide.Workbench>
@@ -51,7 +51,7 @@
       <Data Name="Testing four params" Id="1b11a7f0-a06b-45f7-80b5-00e935d4dd98" ModeId="Default">
         <CommandData>
           <Item Key="MonoDevelop.Ide.Execution.CustomArgsCustomizer">
-            <Value Arguments="telfile1.tlog telfile1Out.txt false FieldMatchFile.txt" ctype="CustomArgsExecutionModeData">
+            <Value Arguments="./telfile1.tlog telfile1Out.txt true FieldMatchFile.txt" ctype="CustomArgsExecutionModeData">
               <EnvironmentVariables />
             </Value>
           </Item>
