@@ -1,0 +1,5 @@
+# Ignored files for tlog parser:
+*.txt
+*.exe
+*.tlog
+*.mdb

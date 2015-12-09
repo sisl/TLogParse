@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
+    <Platform Condition=" '$(Platform)' == '' ">x86</Platform>
+    <ProductVersion>10.0.0</ProductVersion>
+    <SchemaVersion>2.0</SchemaVersion>
+    <ProjectGuid>{BFA5F425-1365-43AC-88B9-83992DC391A3}</ProjectGuid>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>TLogReaderV5</RootNamespace>
+    <AssemblyName>TLogReaderV5</AssemblyName>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|x86' ">
+    <DebugSymbols>true</DebugSymbols>
+    <DebugType>full</DebugType>
+    <Optimize>false</Optimize>
+    <OutputPath>bin\Debug</OutputPath>
+    <DefineConstants>DEBUG;</DefineConstants>
+    <ErrorReport>prompt</ErrorReport>
+    <WarningLevel>4</WarningLevel>
+    <Externalconsole>true</Externalconsole>
+    <PlatformTarget>x86</PlatformTarget>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|x86' ">
+    <Optimize>true</Optimize>
+    <OutputPath>bin\Release</OutputPath>
+    <ErrorReport>prompt</ErrorReport>
+    <WarningLevel>4</WarningLevel>
+    <Externalconsole>true</Externalconsole>
+    <PlatformTarget>x86</PlatformTarget>
+    <additionalargs>/unsafe</additionalargs>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="System" />
+    <Reference Include="log4net">
+      <HintPath>log4net.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="Program.cs" />
+    <Compile Include="Properties\AssemblyInfo.cs" />
+    <Compile Include="TLogUtils.cs" />
+    <Compile Include="MAVLinkInterface.cs" />
+    <Compile Include="ICommsSerial.cs" />
+    <Compile Include="MAVLink\MAVLinkParam.cs" />
+    <Compile Include="MAVLink\MAVLinkParamList.cs" />
+    <Compile Include="MAVLink\MavlinkCRC.cs" />
+    <Compile Include="MAVLink\MavlinkParse.cs" />
+    <Compile Include="MAVLink\Mavlink.cs" />
+    <Compile Include="MAVList.cs" />
+    <Compile Include="MAVState.cs" />
+    <Compile Include="Utilities\locationwp.cs" />
+    <Compile Include="Utilities\PointLatLngAlt.cs" />
+    <Compile Include="Utilities\PointLatLng.cs" />
+    <Compile Include="Utilities\SizeLatLng.cs" />
+    <Compile Include="MavlinkUtil.cs" />
+    <Compile Include="Utilities\CommsSerialPort.cs" />
+  </ItemGroup>
+  <Import Project="$(MSBuildBinPath)\Microsoft.CSharp.targets" />
+  <ItemGroup>
+    <None Include="log4net.dll" />
+  </ItemGroup>
+  <ItemGroup>
+    <Folder Include="MAVLink\" />
+    <Folder Include="Utilities\" />
+  </ItemGroup>
+</Project>

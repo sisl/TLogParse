@@ -1,0 +1,24 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 11.00
+# Visual Studio 2010
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "TLogReaderV5", "TLogReaderV5\TLogReaderV5.csproj", "{BFA5F425-1365-43AC-88B9-83992DC391A3}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|x86 = Debug|x86
+		Release|x86 = Release|x86
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{BFA5F425-1365-43AC-88B9-83992DC391A3}.Debug|x86.ActiveCfg = Debug|x86
+		{BFA5F425-1365-43AC-88B9-83992DC391A3}.Debug|x86.Build.0 = Debug|x86
+		{BFA5F425-1365-43AC-88B9-83992DC391A3}.Release|x86.ActiveCfg = Release|x86
+		{BFA5F425-1365-43AC-88B9-83992DC391A3}.Release|x86.Build.0 = Release|x86
+	EndGlobalSection
+	GlobalSection(MonoDevelopProperties) = preSolution
+		StartupItem = TLogReaderV5\TLogReaderV5.csproj
+		Policies = $0
+		$0.DotNetNamingPolicy = $1
+		$1.DirectoryNamespaceAssociation = None
+		$1.ResourceNamePolicy = FileFormatDefault
+	EndGlobalSection
+EndGlobal

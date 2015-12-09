@@ -1,0 +1,33 @@
+﻿<Properties>
+  <MonoDevelop.Ide.Workspace ActiveConfiguration="Debug|x86" />
+  <MonoDevelop.Ide.Workbench ActiveDocument="TLogReaderV5/Program.cs">
+    <Files>
+      <File FileName="TLogReaderV5/Program.cs" Line="10" Column="26" />
+      <File FileName="TLogReaderV5/TLogUtils.cs" Line="328" Column="23" />
+      <File FileName="TLogReaderV5/MAVLinkInterface.cs" Line="881" Column="26" />
+      <File FileName="TLogReaderV5/Utilities/CommsSerialPort.cs" Line="88" Column="27" />
+      <File FileName="TLogReaderV5/MAVLink/MavlinkParse.cs" Line="1" Column="1" />
+      <File FileName="TLogReaderV5/MavlinkUtil.cs" Line="80" Column="6" />
+    </Files>
+  </MonoDevelop.Ide.Workbench>
+  <MonoDevelop.Ide.DebuggingService.Breakpoints>
+    <BreakpointStore />
+  </MonoDevelop.Ide.DebuggingService.Breakpoints>
+  <MonoDevelop.Ide.DebuggingService.PinnedWatches />
+  <MonoDevelop.Ide.ItemProperties.TLogReaderV5>
+    <MonoDevelop.Ide.CustomExecutionModes>
+      <Data Name="Testing" Id="278d1c46-a2e5-4ea0-bd9c-292903f9f861" ModeId="Default">
+        <CommandData>
+          <Item Key="MonoDevelop.Ide.Execution.CustomArgsCustomizer">
+            <Value Arguments="telfile1.tlog telfile1.txt true" ctype="CustomArgsExecutionModeData">
+              <EnvironmentVariables />
+            </Value>
+          </Item>
+          <Item Key="MonoDevelop.Ide.Execution.MonoExecutionCustomizer">
+            <Value ctype="MonoExecutionParameters" />
+          </Item>
+        </CommandData>
+      </Data>
+    </MonoDevelop.Ide.CustomExecutionModes>
+  </MonoDevelop.Ide.ItemProperties.TLogReaderV5>
+</Properties>
