@@ -1,7 +1,7 @@
 # TLogParse
 Parser for telemetry log (tlog) files from mission planner software.
 
-TLogProcessor.jl is desigen to process Mission Planner .tlog files into Julia data structures.  Here's how to run it:
+TLogProcessor.jl is designed to process Mission Planner .tlog files into Julia data structures.  Here's how to run it:
 
 julia\> tlogDatArray, udArray, timeKey = processTLog(readpath="/", writepath="/", createTextLogs=false, jldSaveNameBase="tlogData", fieldMatchFile="FieldMatchFile.txt", VERBOSE=false, timeKey="time_unix_usec_._mavlink_system_time_t");
 
