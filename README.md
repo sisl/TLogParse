@@ -3,13 +3,13 @@ Parser for telemetry log (tlog) files from mission planner software.
 
 TLogProcessor.jl is designed to process Mission Planner .tlog files into Julia data structures.  Here's how to run it:
 
-julia\> tlogDatArray, udArray, timeKey = processTLog(readpath="/", writepath="/", createTextLogs=false, jldSaveNameBase="tlogData", fieldMatchFile="FieldMatchFile.txt", VERBOSE=false, timeKey="time_unix_usec_._mavlink_system_time_t");
+julia\> tlogDatArray, udArray, timeKey = processTLog(readpath="/", writepath="/", createTextLogs=false, jldSaveNameBase="tlogData", fieldMatchFile="FieldMatchFile.txt", VERBOSE=false, timeKey="time_unix_usec_._mavlink_system_time_t", maxTlogsinArray::Int64=100, tlogParseExe::AbstractString="./TLogReader.exe");
 
-readpath and writepath are simply the places you'd like to read tlogs from and where you'd like to store the output files (text versions of the tlog files and/or julia data structures of the data).  Note: don't put leading . on your paths.  That will confuse my .tlog file finder and cause it to skip that folder entirely. The boolean createTextLogs indicates whether to actually write the tlog parameters to a text file; if false, only the julia data structures will be saved. jldSaveNameBase indicates the .jld filename in which to store the julia data structures.  Note that currently if there are more than 100 files to parse it does not create the tlogDatArray data structure out of fear that it will be too large.  Instead, it saves the data structures as individual .jld files which can be read in sequentially and processed individually in julia. fieldMatchFile is a list of parameters to convert, if omitted it will convert all parameters (see the following paragraph).  timeKey indicates which tlog parameter to use as the timestamp when collecting sequential parameters into discrete time bins.
+readpath and writepath are simply the places you'd like to read tlogs from and where you'd like to store the output files (text versions of the tlog files and/or julia data structures of the data).  Note: don't put leading . on your paths.  That will confuse my .tlog file finder and cause it to skip that folder entirely. The boolean createTextLogs indicates whether to actually write the tlog parameters to a text file; if false, only the julia data structures will be saved. jldSaveNameBase indicates the .jld filename in which to store the julia data structures.  Note that currently if there are more than maxTlogsinArray files to parse it does not create the tlogDatArray data structure out of fear that it will be too large.  Instead, it saves the data structures as individual .jld files which can be read in sequentially and processed individually in julia. fieldMatchFile is a list of parameters to convert, if omitted it will convert all parameters (see the following paragraph).  timeKey indicates which tlog parameter to use as the timestamp when collecting sequential parameters into discrete time bins. 
 
 The outputs of TLogProcessor are the array of data tables (one entry per .tlog file, as long as there are fewer than 100 files, otherwise it will be empty), an array of the unique identifiers pulled out of each tlog file (this can be used to index into the data tables without worrying about figuring out the column numbers), and the timekey used to align all the data into bins.
 
-The batch processor relys on calls to the C# programe TLogReader.exe, which converts the tlog file into a text file. The usage for that program is:
+The batch processor relys on calls to the C# programe TLogReader.exe (or, in some cases, TLogReaderV5.exe), which converts the tlog file into a text file. If you build the program with a different name you can specify the batch processing executable in the string parameter tlogParseExe. The usage for that program is:
 
 \>\> TLogReader.exe inputfile.tlog [outputfile.txt] [verbose: true/false] [FieldMatchFile.txt]
 
@@ -28,6 +28,9 @@ Note also that users specify which telemetry parameters to pass over MAVLink and
 guarantee that every parameter will be received/stored at each time step.  That's bandwidth limited.  So the presence
 of a parameter in one .tlog file is no guarantee that it will be in another.  See the Mission Planner documentation
 for an explanation of these parameters (http://planner.ardupilot.com/wiki/mission-planner-overview/)
+
+## Building the Code
+The C# software was developed in the IDE MonoDevelop under Ubuntu 14.04.  You should be able to open the TLogReaderV5.sln file with MonoDevelop and build it fully, all dependencies should be in this repository.  The executable and the log4net.dll library should be the only files you need to run the above julia program (TLogProcessor.jl).
 
 ## Recommended TLog Parameters to Parse
 vx
