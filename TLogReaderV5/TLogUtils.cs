@@ -26,6 +26,7 @@ namespace MissionPlanner.Log
 				fields = System.IO.File.ReadAllLines(@fieldMatchFile);
 			} catch {
 				Console.WriteLine ("Could not open field matching file, will match all fields.");
+				fields = null;
 			}
 			return fields;
 		}

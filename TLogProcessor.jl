@@ -22,14 +22,15 @@ using HDF5, JLD, DataFrames, DataArrays, PyPlot
 
 # Note: don't put leading . on your paths.  That will confuse my .tlog file finder and cause it to skip that folder entirely.
 
-function processTLog(;readpath::AbstractString="", writepath::AbstractString="", createTextLogs::Bool=false, 
+function processTLog(;readpath::AbstractString="./", writepath::AbstractString="./", createTextLogs::Bool=false, 
 					  jldSaveNameBase::AbstractString="tlogData", fieldMatchFile::AbstractString="FieldMatchFile.txt", 
-					  VERBOSE::Bool=false, timeKey::AbstractString="time_unix_usec_._mavlink_system_time_t")
+					  VERBOSE::Bool=false, timeKey::AbstractString="time_unix_usec_._mavlink_system_time_t",
+					  maxTlogsinArray::Int64=100, tlogParseExe::AbstractString="./TLogReader.exe")
 # This function can either convert tlog files into text files, or convert the data into
 # Julia data structures and leave off the large text files.  Set createTextLogs to true
 # to retain the text files. If false, they will be deleted.
 # tlogDatArray, udArray, timeKey = processTLog();
-# tlogDatArray, udArray, timeKey = processTLog(readpath="/", writepath="/", createTextLogs=false, jldSaveNameBase="tlogData.jld", fieldMatchFile="FieldMatchFile.txt", VERBOSE=false, timeKey="time_unix_usec_._mavlink_system_time_t");
+# tlogDatArray, udArray, timeKey = processTLog(readpath="./", writepath="./", createTextLogs=false, jldSaveNameBase="tlogData.jld", fieldMatchFile="FieldMatchFile.txt", VERBOSE=false, timeKey="time_unix_usec_._mavlink_system_time_t");
 
 	outFileName = string(writepath,"templog.txt")
 	tlogDatArray = DataFrame[]
@@ -47,11 +48,11 @@ function processTLog(;readpath::AbstractString="", writepath::AbstractString="",
 		 		end
 
 		 		if VERBOSE
-			 		display("Running command: ./TLogReader.exe $(string(readpath,fileList[i])) $outFileName $VERBOSE $(string(readpath,fieldMatchFile))")
+			 		display("Running command: $tlogParseExe $(string(readpath,fileList[i])) $outFileName $VERBOSE $(string(readpath,fieldMatchFile))")
 				end
 
 		 		tic();
-				run(`./TLogReader.exe $(string(readpath,fileList[i])) $outFileName $VERBOSE $(string(readpath,fieldMatchFile))`)
+				run(`$tlogParseExe $(string(readpath,fileList[i])) $outFileName $VERBOSE $(string(readpath,fieldMatchFile))`)
 
 				#  Now that we have a text file with our contents, read them in using Julia functions
 				if !isfile(outFileName)
@@ -66,8 +67,8 @@ function processTLog(;readpath::AbstractString="", writepath::AbstractString="",
 					#   1. AGL data
 					#   2. Airspace class data
 					#   3. Country location
-					if length(fileList)<=100
-						# If there are more than a hundred files, don't store everything in one giant data array.  Will
+					if length(fileList)<=maxTlogsinArray
+						# If there are more than maxTlogsinArray files, don't store everything in one giant data array.  Will
 						# need to plot and analyze trajectories individually through their jld files, I think.
 						push!(tlogDatArray,tlogDat)
 						push!(udArray,ud)

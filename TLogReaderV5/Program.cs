@@ -20,23 +20,30 @@ namespace TLogReaderV5
 				return;
 			} else if (nargs >= 1) { 
 				inputFileName = args [0];
-				string[] stringSeparators = new string[] {"."};
-				string[] tmpStr = inputFileName.Split(stringSeparators, StringSplitOptions.None);
+
 				int inLen = inputFileName.Length;
-				int tmpStrLen = tmpStr.Length;
-				if (String.Equals("tlog",tmpStr[tmpStrLen-1])) {
-//				if ((String.Equals (inputFileName [inLen - 5], '.')) & 
-//					(String.Equals (inputFileName [inLen - 4], 't')) & 
-//					(String.Equals (inputFileName [inLen - 3], 'l')) & 
-//					(String.Equals (inputFileName [inLen - 2], 'o')) & 
-//					(String.Equals (inputFileName [inLen - 1], 'g'))) {
+//				int tmpStrLen = tmpStr.Length;
+//				if (String.Equals("tlog",tmpStr[tmpStrLen-1])) {
+				if ((String.Equals (inputFileName [inLen - 5], '.')) & 
+					(String.Equals (inputFileName [inLen - 4], 't')) & 
+					(String.Equals (inputFileName [inLen - 3], 'l')) & 
+					(String.Equals (inputFileName [inLen - 2], 'o')) & 
+					(String.Equals (inputFileName [inLen - 1], 'g'))) {
 					// We have a tlog file, proceed with parsing: args
 
 					if (nargs == 1) {
 						// Only have an input filename, so create an output filename.  Leave verbose false and no fieldMatch
-
+						char[] outFileName = new char[inLen-1];
+						for (int i=0; i<inLen-4; i++) {
+							outFileName [i] = inputFileName [i];
+						}
+						outFileName[inLen-4] = 't';
+						outFileName[inLen-3] = 'x';
+						outFileName[inLen-2] = 't';
+						outputFileName = new string(outFileName);
+						//Console.WriteLine ("Writing output to {0}", outputFileName);
 						//inputFileName.CopyTo (0, tempStr, 0, inputFileName.Length - 4);
-						outputFileName = String.Concat (tmpStr[0], ".txt");
+						//outputFileName = String.Concat (tmpStr[0], ".txt");
 					} else if (nargs == 2) {
 						outputFileName = args [1];
 					} else if (nargs == 3) { 
@@ -66,7 +73,7 @@ namespace TLogReaderV5
 
 
 			if (VERBOSE) {
-				if (fieldMatchFile == null) {
+				if ((fieldMatchFile == null) | (fieldMatch == null)) {
 					Console.WriteLine ("Parsing all fields in tlog file {0}, outputting to {1}.  ", inputFileName, outputFileName);
 				} else {
 					Console.WriteLine ("Parsing tlog file {0}, outputting to {1}. Matching fields from {2}", inputFileName, outputFileName, fieldMatchFile);
