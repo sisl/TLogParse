@@ -2,8 +2,8 @@
   <MonoDevelop.Ide.Workspace ActiveConfiguration="Release|x86" />
   <MonoDevelop.Ide.Workbench ActiveDocument="Program.cs">
     <Files>
-      <File FileName="Program.cs" Line="44" Column="9" />
-      <File FileName="TLogUtils.cs" Line="176" Column="36" />
+      <File FileName="Program.cs" Line="28" Column="57" />
+      <File FileName="TLogUtils.cs" Line="24" Column="27" />
     </Files>
   </MonoDevelop.Ide.Workbench>
   <MonoDevelop.Ide.DebuggingService.Breakpoints>

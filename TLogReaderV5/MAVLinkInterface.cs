@@ -2629,12 +2629,12 @@ namespace MissionPlanner.Mavlink
                     log.InfoFormat("Mavlink Bad Packet (Len Fail) len {0} pkno {1}", buffer.Length, buffer[5]);
                     if (buffer.Length == 11 && buffer[0] == 'U' && buffer[5] == 0) // check for 0.9 hb packet
                     {
-                        string message =
-                            "Mavlink 0.9 Heartbeat, Please upgrade your AP, This planner is for Mavlink 1.0\n\n";
-                        Console.WriteLine(message);
-                        if (logreadmode)
-                            logplaybackfile.BaseStream.Seek(0, SeekOrigin.End);
-                        throw new Exception(message);
+                        //string message =
+                        //    "Mavlink 0.9 Heartbeat, Please upgrade your AP, This planner is for Mavlink 1.0\nContinuing without addressing error...\n";
+                        //Console.WriteLine(message);
+//                        if (logreadmode)
+//                            logplaybackfile.BaseStream.Seek(0, SeekOrigin.End);
+//                        throw new Exception(message);
                     }
                     return new byte[0];
                 }
@@ -3005,8 +3005,8 @@ namespace MissionPlanner.Mavlink
                     MAVlist[wp.target_system, wp.target_component].wps[wp.seq] = wp;
                 }
 
-                Console.WriteLine("WP # {7} cmd {8} p1 {0} p2 {1} p3 {2} p4 {3} x {4} y {5} z {6}", wp.param1, wp.param2,
-                    wp.param3, wp.param4, wp.x, wp.y, wp.z, wp.seq, wp.command);
+//                Console.WriteLine("WP # {7} cmd {8} p1 {0} p2 {1} p3 {2} p4 {3} x {4} y {5} z {6}", wp.param1, wp.param2,
+//                    wp.param3, wp.param4, wp.x, wp.y, wp.z, wp.seq, wp.command);
             }
 
             if (buffer[5] == (byte) MAVLINK_MSG_ID.RALLY_POINT)
