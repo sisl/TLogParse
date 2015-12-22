@@ -1,13 +1,13 @@
-﻿<Properties>
-  <MonoDevelop.Ide.Workspace ActiveConfiguration="Debug|x86" />
+﻿<Properties StartupItem="TLogReaderV5/TLogReaderV5.csproj">
+  <MonoDevelop.Ide.Workspace ActiveConfiguration="Release|x86" />
   <MonoDevelop.Ide.Workbench ActiveDocument="TLogReaderV5/Program.cs">
     <Files>
-      <File FileName="TLogReaderV5/Program.cs" Line="10" Column="26" />
-      <File FileName="TLogReaderV5/TLogUtils.cs" Line="328" Column="23" />
-      <File FileName="TLogReaderV5/MAVLinkInterface.cs" Line="881" Column="26" />
-      <File FileName="TLogReaderV5/Utilities/CommsSerialPort.cs" Line="88" Column="27" />
+      <File FileName="TLogReaderV5/Program.cs" Line="13" Column="20" />
+      <File FileName="TLogReaderV5/TLogUtils.cs" Line="1" Column="1" />
+      <File FileName="TLogReaderV5/MAVLinkInterface.cs" Line="1" Column="1" />
+      <File FileName="TLogReaderV5/Utilities/CommsSerialPort.cs" Line="1" Column="1" />
       <File FileName="TLogReaderV5/MAVLink/MavlinkParse.cs" Line="1" Column="1" />
-      <File FileName="TLogReaderV5/MavlinkUtil.cs" Line="80" Column="6" />
+      <File FileName="TLogReaderV5/MavlinkUtil.cs" Line="1" Column="1" />
     </Files>
   </MonoDevelop.Ide.Workbench>
   <MonoDevelop.Ide.DebuggingService.Breakpoints>

@@ -20,6 +20,24 @@ using HDF5, JLD, DataFrames, DataArrays, PyPlot, Interpolations, Dierckx
 # of a parameter in one .tlog file is no guarantee that it will be in another.  See the Mission Planner documentation
 # for an explanation of these parameters (http://planner.ardupilot.com/wiki/mission-planner-overview/)
 
+# Planned upgrades:
+# 1. Sort timeHist if it's not in sorted order?  OR would files with this problem have many other problems too?
+# 2. Figure out the appropriate time sigma for filtering, curretly all 2 seconds.  That may be too short for velocity.
+# 3. Implement a derivative function that can return arbitrary derivative orders using arbitrary number of points left/right of current point.  See https://commons.wikimedia.org/wiki/File:FDnotes.djvu
+# 4. Remove the now-unnecessary parameters from the filterParams() structure.  keyParaams and params2Smooth
+# 5. Add capability to individually generate features from one jld at a time, not compile everything into a huge array.  Will have to write the features out to a log file.
+# 6. Remove outlier positions (calculated the way Mykel did in his paper, d_distance/dt), though velocity will not be directly used.  Thought that wasn't an issue, but have seen it at least once.
+# 7. Switch to numerical derivatives of position to get velocity rather than reported vx and vy? There seem to be important discrepancies between those variables, and it would be best to be self-consistent.
+# 8. Might need a maximum dropout rate.  IF two time stamps are too far apart (after removing positons, for example), we might need to break into two tracks  to avoid having a super-linear stretch.
+# 9. Should make the number of standard deviations at which to remove a time stamp a parameter in filterParams. But I don't want to lose the ability to load the older jld files (yet).  Make sure I've fixed every problem then re-parse everything.
+# 10. Double check the position filtering file, perhaps with 11335.tlog?  That seemed to have a lot of problems in it.  Why does it remove points when they have zero net velocity change?
+# 11. Rename the output jld files to match the input names, but with a tlogDat prefix.  Otherwise we're over-writing the files.
+
+# Work flow:
+# 1. processTlog() takes in a .tlog file/folder and writes the tlog data (not features) and filter parameters to a .jld file. If the number of input files is smaller than a user-selectable parameter (20), then it also returns an array of that data.
+# 2. featureFolder2csv() will read in a set of .jld files and write to a single, giant csv file the features contained in the .jld tlog file.
+# 3. plotTlogData() takes in a tlogDat data frame or array of data frames and plots the most interesting state variable histories.
+
 type FilterParams
 
 	distanceOutlier::Float64 		# Points thta increase path length more than this amount will be removed (probably from spurrious position estimates or data corruption).  May use velocity instead
@@ -45,8 +63,12 @@ type FilterParams
 	bcSpline::AbstractString    # Options are "zero", "extrapolate", "error" and "nearest"
 	smthFactorSpline::Float64   # Smoothing factor (higher is smoother, but approx may not be close to the data points).  By means of this parameter, the user can control the tradeoff between closeness of fit and smoothness of fit of the approximation. if s is too large, the spline will be too smooth and signal will be lost ; if s is too small the spline will pick up too much noise.
 
-	FilterParams(distanceOutlier, velocityOutlier, keyParams, latParam, lonParam, params2Smooth, smoothingSigma, tInterval, maxSmoothSigma, timeStr, latStr, lonStr, altStr, vxStr, vyStr, useSplineFit, degSpline, bcSpline, smthFactorSpline) = 
-			 new(distanceOutlier, velocityOutlier, keyParams, latParam, lonParam, params2Smooth, smoothingSigma, tInterval, maxSmoothSigma, timeStr, latStr, lonStr, altStr, vxStr, vyStr, useSplineFit, degSpline, bcSpline, smthFactorSpline)
+	maxDrDtThreshold::Float64 	# Maximum horizontal velocity between position reports (given dt) that is allowable.  Expressed in ft/s
+	maxDhDtThreshold::Float64   # Maximum horizontal velocity between position reports (given dt) that is allowable.  Expressed in ft/s
+
+
+	FilterParams(distanceOutlier, velocityOutlier, keyParams, latParam, lonParam, params2Smooth, smoothingSigma, tInterval, maxSmoothSigma, timeStr, latStr, lonStr, altStr, vxStr, vyStr, useSplineFit, degSpline, bcSpline, smthFactorSpline, maxDrDtThreshold, maxDhDtThreshold) = 
+			 new(distanceOutlier, velocityOutlier, keyParams, latParam, lonParam, params2Smooth, smoothingSigma, tInterval, maxSmoothSigma, timeStr, latStr, lonStr, altStr, vxStr, vyStr, useSplineFit, degSpline, bcSpline, smthFactorSpline, maxDrDtThreshold, maxDhDtThreshold)
 end
 
 function FilterParams()
@@ -81,7 +103,10 @@ function FilterParams()
 	bcSpline = "nearest"    # Options are "zero", "extrapolate", "error" and "nearest"
 	smthFactorSpline = 0.0  # Smoothing factor (higher is smoother, but approx may not be close to the data points).  By means of this parameter, the user can control the tradeoff between closeness of fit and smoothness of fit of the approximation. if s is too large, the spline will be too smooth and signal will be lost ; if s is too small the spline will pick up too much noise.
 
-	return FilterParams(distanceOutlier, velocityOutlier, keyParams, latParam, lonParam, params2Smooth, smoothingSigma, tInterval, maxSmoothSigma, timeStr, latStr, lonStr, altStr, vxStr, vyStr, useSplineFit, degSpline, bcSpline, smthFactorSpline)
+	maxDrDtThreshold = 300. * 6071./3600. 	# Maximum horizontal velocity between position reports (given dt) that is allowable.  Expressed in ft/s
+	maxDhDtThreshold = 3000. * 1./60. 	    # Maximum horizontal velocity between position reports (given dt) that is allowable.  Expressed in ft/s
+
+	return FilterParams(distanceOutlier, velocityOutlier, keyParams, latParam, lonParam, params2Smooth, smoothingSigma, tInterval, maxSmoothSigma, timeStr, latStr, lonStr, altStr, vxStr, vyStr, useSplineFit, degSpline, bcSpline, smthFactorSpline, maxDrDtThreshold, maxDhDtThreshold)
 end
 
 function FilterParams(smoothingSigma::Array{Float64})
@@ -117,8 +142,10 @@ function FilterParams(smoothingSigma::Array{Float64})
 	bcSpline = "nearest"    # Options are "zero", "extrapolate", "error" and "nearest"
 	smthFactorSpline = 0.0  # Smoothing factor (higher is smoother, but approx may not be close to the data points).  By means of this parameter, the user can control the tradeoff between closeness of fit and smoothness of fit of the approximation. if s is too large, the spline will be too smooth and signal will be lost ; if s is too small the spline will pick up too much noise.
 
+	maxDrDtThreshold = 200. * 6071./3600. 	# Maximum horizontal velocity between position reports (given dt) that is allowable.  Expressed in ft/s
+	maxDhDtThreshold = 3000. * 1./60. 	    # Maximum horizontal velocity between position reports (given dt) that is allowable.  Expressed in ft/s
 
-	return FilterParams(distanceOutlier, velocityOutlier, keyParams, latParam, lonParam, params2Smooth, smoothingSigma, tInterval, maxSmoothSigma, timeStr, latStr, lonStr, altStr, vxStr, vyStr, useSplineFit, degSpline, bcSpline, smthFactorSpline)
+	return FilterParams(distanceOutlier, velocityOutlier, keyParams, latParam, lonParam, params2Smooth, smoothingSigma, tInterval, maxSmoothSigma, timeStr, latStr, lonStr, altStr, vxStr, vyStr, useSplineFit, degSpline, bcSpline, smthFactorSpline, maxDrDtThreshold, maxDhDtThreshold)
 end
 
 function getUnitConversions()
@@ -164,67 +191,499 @@ function getUnitConversions()
 
 end
 
-function extractFeatures(tlogDatArray::Array{DataFrame})
+function extractFeatures(tlogDatArray::DataFrame; filterParams::FilterParams=FilterParams())
+	return extractFeatures([tlogDatArray], filterParams=filterParams)[1]
+end
+
+function extractFeatures(tlogDatArray::Array{DataFrame}; filterParams::FilterParams=FilterParams())
 	# This function extracts a set of "features" from the raw tlog data.  The set is currently large because
 	# I don't know which features I'l lend up using.
 
+	featureArray = Array(DataFrame,length(tlogDatArray))
+	# for i=1:length(ud) 
+ # 		datArray[symbol(ud[i])]=DataArray(Float64,numTimeElems)
+ # 		#datArray[:,symbol(ud[i])] = NA
+ # 	end
+
+	for i=1:length(tlogDatArray)
+		featureMat = DataFrame()
+
+		timeHist = convert(Array, tlogDatArray[i][:,symbol(filterParams.timeStr)])
+		lat = convert(Array, tlogDatArray[i][:,symbol(filterParams.latStr)])
+		lon = convert(Array, tlogDatArray[i][:,symbol(filterParams.lonStr)])
+		alt = convert(Array, tlogDatArray[i][:,symbol(filterParams.altStr)])
+		vel = convert(Array,(tlogDatArray[i][:,symbol(filterParams.vxStr)].^2+tlogDatArray[i][:,symbol(filterParams.vyStr)].^2).^0.5)
+		vx = convert(Array,(tlogDatArray[i][:,symbol(filterParams.vxStr)]))
+		vy = convert(Array,(tlogDatArray[i][:,symbol(filterParams.vyStr)]))
+
+		# Create range feature:
+		x,y = convertLL2XY(lat,lon)
+		rangeFeature = sqrt(x.^2+y.^2)
+		featureMat[:range] = DataArray(rangeFeature)
+
+		# Create velocity feature:
+		featureMat[:vel] = DataArray(vel)
+
+		# Create bearing from origin feature (CW from North in degrees)
+		featureMat[:bearing] = 180/pi * DataArray(atan2(x,y))
+
+		# Create radial-relative heading (directly away from origin is zero, directly to origin is 180, perpendicular to radius is +-90 deg)
+		featureMat[:heading] = 180/pi * DataArray(atan2(vx,vy))
+		featureMat[:rrHeading] = featureMat[:heading]-featureMat[:bearing]
+
+		# Create acceleration feature using central difference:
+		featureMat[:vdot] = DataArray(getDeriv(vel, timeHist, n=1, k=1))
+
+		# Create radial-relative heading rate feature vector:
+		featureMat[:rrHeaddot] = DataArray(getDeriv(convert(Array,featureMat[:rrHeading]), timeHist, n=1, k=1))
+
+		# Create altitude feature (currently MSL altitude, which isn't good)
+		featureMat[:alt] = DataArray(alt)
+
+		# Create altitude rate feature (currently MSL altitude, which isn't good)
+		featureMat[:altdot] = DataArray(getDeriv(alt, timeHist, n=1, k=1))
+
+		# Create a velocity feature based on the positions and time stamps, not the reported velocity (I fear the reported velocity may be inconsistent with the position updates...)
+		dx = diff(x)
+		dy = diff(y)
+		dxy = cumsum([0; sqrt(dx.^2+dy.^2)])
+		featureMat[:dxdt] = DataArray(getDeriv(dxy, timeHist, n=1, k=1) * 3600/6071)
+
+		# Since I'm calculating the path distance to get velocity anyway, might as well record it (unless it takes up too much space)
+		featureMat[:pathDist] = DataArray(dxy)
+
+		featureArray[i] = featureMat
+	end
+
+	return featureArray
 
 end
 
-# function loadTLog(;readpath::AbstractString="./tlogout")
-# # This function loads tlog jld files from the specified read path and returns them  in a tlog data array.
-# # tlogDatArray, fParamArray = loadTLog(readpath="./")
+function tlogFolder2csv(;readPath::AbstractString="./", writeFile::AbstractString="./tlogHistory", outputType::AbstractString=".csv", VERBOSE::Bool=false)
+	# Will save all jld tlog data contained in readPath in the csv file specified by writefile
 
-# 	tlogDatArray = DataFrame[]
-# 	fParamArray = FilterParams[]
-# 	fileList = readdir(readpath)
+	tlogDatArray = DataFrame[]
+	fParamArray = FilterParams[]
+	fileList = readdir(readPath)
+	firstJLD = true
+	firstNames = Symbol[]
+	ind = 1
 
-# 	for i=1:length(fileList)
-# 		if length(fileList[i])>5
-# 	 		if (fileList[i][end-2:end] == "jld")
-# 	 			display("Found jld file: $(fileList[i])")
-# 	 			#try
-# 		 			varsLoaded = @load fileList[i];
-# 		 		#catch
-# 		 		#	varsLoaded = Symbol[]
-# 		 		#end
-# 	 			if in(symbol("tlogDatInterp"),varsLoaded)
-# 		 			tlogDatArray = [tlogDatArray; tlogDatInterp]
-# 		 			display("Reading data from $(fileList[i])")
-# 		 			if in(symbol("filterParams"),varsLoaded)
-# 		 				fParamArray = [fParamArray; filterParams]
-# 		 			else
-# 		 				fParamArray = [fParamArray; FilterParams()]
-# 		 			end
-# 		 		end
-# 	 		end
-# 	 	end
-# 	 end
+	for i=1:length(fileList)
+		if length(fileList[i])>5
+	 		if (fileList[i][end-2:end] == "jld")
+	 			if VERBOSE
+		 			display("Loading jld file $(fileList[i]) and writing to $(string(writeFile,outputType))")
+				end
+				tlogDatInterp, FilterParams = loadTLog(string(readPath,fileList[i]), VERBOSE=VERBOSE)
+				tlogDatInterp[:,symbol("FlightNum")] = ind*ones(Int64, size(tlogDatInterp,1))
+				ind += 1
+				namestlog = names(tlogDatInterp)
 
-# 	 return tlogDatArray, fParamArray
+				# Need to include a header only in the first call to write table.  Should also check to make sure the names are all the same:
+				if firstJLD
+					firstJLD = false
+					firstNames = namestlog
+					writetable(string(writeFile,outputType),tlogDatInterp,append=false,header=true)
+				else
+					# Check whether the names match the first names (will continue, however):
+					if any(namestlog.!=firstNames)
+						display("Warning, the names in file $(fileList[i]) don't match the names in the original output file:")
+						display("Names in original file: $firstNames")
+						display("Names in $(fileList[i]): $namestlog")
+					end
+					writetable(string(writeFile,outputType),tlogDatInterp,append=true,header=false)
+				end
 
-# end
+			end
+		end
+	end
+
+	return 0
+end
+
+function featureFolder2csv(;readPath::AbstractString="./", writeFile::AbstractString="./featureHistory", outputType::AbstractString=".csv", VERBOSE::Bool=false)
+	# Will save all jld tlog data contained in readPath in the csv file specified by writefile
+
+	tlogDatArray = DataFrame[]
+	fParamArray = FilterParams[]
+	fileList = readdir(readPath)
+	firstJLD = true
+	firstNames = Symbol[]
+	ind = 1
+	n = length(fileList)
+
+	for i=1:n
+		if length(fileList[i])>5
+	 		if (fileList[i][end-2:end] == "jld")
+	 			if VERBOSE
+		 			display("Loading jld file $i/$n: $(fileList[i]). Writing to $(string(writeFile,outputType))")
+				end
+				tlogDatInterp, filterParams = loadTLog(string(readPath,fileList[i]), VERBOSE=VERBOSE)
+				features = extractFeatures(tlogDatInterp, filterParams=filterParams)
+				features[:,symbol("FlightNum")] = ind*ones(Int64, size(features,1))
+				ind += 1
+				namestlog = names(features)
+
+				# Need to include a header only in the first call to write table.  Should also check to make sure the names are all the same:
+				if firstJLD
+					firstJLD = false
+					firstNames = namestlog
+					writetable(string(writeFile,outputType),features,append=false,header=true)
+				else
+					# Check whether the names match the first names (will continue, however):
+					if any(namestlog.!=firstNames)
+						display("Warning, the names in file $(fileList[i]) don't match the names in the original output file:")
+						display("Names in original file: $firstNames")
+						display("Names in $(fileList[i]): $namestlog")
+					end
+					writetable(string(writeFile,outputType),features,append=true,header=false)
+				end
+
+			end
+		end
+	end
+
+	return 0
+end
+
+function binFeatures(dataFile::AbstractString)
+	tf = readtable(dataFile, header=true)
+	outbins = binFeatures(tf)
+
+	# Do something with the bins?
+
+end
+
+function getAutoBinEdges(datArray::DataArray; numBins::Int64=6)
+# Returns a set of bin edges based on the bin count and the same number of entries being in each bin.
+
+	datSort = sort(datArray)
+	datLen = length(datSort)
+	indArr = Int64[]
+	stepPrct = 1/numBins
+	binEdges = Array(Float64,numBins+1)
+
+	binEdges[1] = datSort[1]
+	for i=1:numBins
+		prctVal = i*stepPrct
+		prctInd = floor(Int,prctVal*datLen)
+		binEdges[i+1] = datSort[prctInd]
+	end
+
+	return binEdges
+
+end	
+
+# Here are our features, with bin edges selected to make roughly equal numbers of data points in each bin (so they are not uniformly spaced):
+#  :range (ft) [0.0, 6.62105, 20.2713, 57.4401, 191.642, 677.942, 1981.8]
+#  :vel   (kts) [0.,0.0317517, 0.0979747, 0.339625, 2.59219, 17.3287, 29.0623, 46.0387]
+#  :bearing  (deg) [-180.0, -127.544, -83.4834, -45.5739, -1.00285, 45.3191, 92.3315, 140.121]
+#  :heading  (deg) [-180.0, -124.378,-78.9133, -25.1267, 14.5364, 66.4746, 93.8072, 128.981]
+#  :rrHeading (deg) [-360, -177.5, -96.4994, -41.989, 8.41766, 60.1614, 116.999, 187.001]    # before rectification
+#  :rrHeading (deg) [0.0, 46.3583, 93.0749, 132.754, 176.582, 225.874, 265.326, 311.901]     # after rectification
+#  :vdot     (kts/s) [-60.2262, -0.188663, -0.0437868, -0.0103595, 0.0, 0.012615, 0.0494847, 0.223948, 28.2656]
+#  :rrHeaddot (deg/s) [-2354.47, -15.3275, -3.50304, -0.325726, 0.000748911, 0.198675, 2.4845, 13.8329]
+#  :alt      (ft) [-4190.56, 12.2128, 89.7661, 211.148, 424.309, 687.007, 969.719, 1915.82]
+#  :altdot  (ft/s) [-87.6822, -0.994523, -0.296876, -0.0844747, 1.7053e-12, 0.0793538, 0.305454, 1.01627]
+#  :dxdt     (kts) [0., 0.0259615, 0.0674304, 0.152337, 0.405003, 2.6992, 19.0364, 31.2167] 
+#  :pathDist (ft)  [0., 184.071, 1131.49, 3356.55, 7708.31, 12944.6, 37394.2, 89585.0]
+#  :FlightNum (Int)
+
+# Now creating bins to minimize the number but also capture typical performance:
+#  :rangeBin = [0.0, 10., 20., 60., 200., 500., 2000., 5000., Inf]
+#  :velBin = [0., 0.1, 1., 2.5, 10., 25., 50., Inf]
+#  :bearingBin = [-180.0, -90., -45., 0., 45., 90., 180.]
+#  :headingBin = [-180.0, -90., -45., 0., 45., 90., 180.]
+#  :rrHeadingBin = [0., 45, 90., 135., 180., 225., 270., 315., 360.]
+#  :vdotBin = [-60, -0.2, -0.05, -0.01, 0.01, 0.05, 0.2, 30.]
+#  :rrHeaddotBin = [-2400., -15., -3.5, -0.35, 0., 0.35, 3.5, 15.]
+#  :altBin  = [-4200, -10., 15., 100., 200, 400, 700., 1000., 2000., Inf]
+#  :altdotBin = [-90, -1., -0.3, -0.05, 0.05, 0.30, 1., Inf]
+#  :dxdtBin = [0., 0.05, 0.25, 0.75, 5., 20., 30., Inf] 
+#  :pathDistBin =  [0., 200., 1000., 3500., 7500., 13000., 35000., 90000., Inf]
+#  :FlightNum (Int)
+
+function getHardCodedEdges(featSym::Symbol)
+	# I think our main features (to start) should be range, dxdt, rrHeading, vdot, rrHeadDot, alt, altdot
+	# With the following discretization, that come sout to 1,185,408 possible state combinations.  We have 10,422,608 data points.
+
+	bins = Float64[]
+
+	if featSym==:range
+		bins = [0.0, 10., 20., 60., 200., 500., 2000., 5000., Inf]
+	end
+	if featSym==:vel
+		bins = [0., 0.1, 1., 2.5, 10., 25., 50., Inf]
+	end
+	if featSym==:bearing
+		bins = [-180.0, -90., -45., 0., 45., 90., 180.]
+	end
+	if featSym==:heading
+	 	bins = [-180.0, -90., -45., 0., 45., 90., 180.]
+	 end
+ 	if featSym==:rrHeading
+	 	bins = [0., 45, 90., 135., 180., 225., 270., 315., 360.]
+	 end
+ 	if featSym==:vdot
+	 	bins = [-60, -0.2, -0.05, -0.01, 0.01, 0.05, 0.2, 30.]
+	 end
+ 	if featSym==:rrHeaddot
+	 	bins = [-2400., -15., -3.5, -0.20, 0.20, 3.5, 15.]
+	 end
+ 	if featSym==:alt
+	 	bins  = [-4200, -10., 15., 100., 200, 400, 700., 1000., 2000., Inf]
+	 end
+ 	if featSym==:altdot
+	 	bins = [-90, -1., -0.3, -0.05, 0.05, 0.30, 1., Inf]
+	 end
+ 	if featSym==:dxdt
+	 	bins = [0., 0.05, 0.25, 0.75, 5., 20., 30., Inf] 
+	 end
+ 	if featSym==:pathDist
+	 	bins =  [0., 200., 1000., 3500., 7500., 13000., 35000., 90000., Inf]
+	end
+
+	if isempty(bins)
+		display("Warning, no bin sizes returned")
+	end
+
+	return bins
+end
+
+function convertFeature2Bin!(feat::DataFrame, indMat::DataFrame; binSymArray::Array{Symbol}=[:range, :dxdt, :rrHeading, :vdot, :rrHeaddot, :alt, :altdot])
+	# Receives a single array of values and returns the indicies of the bins it would be in.  Currently hard coded for
+	# the bins, with the following features:
+	# range, dxdt, rrHeading, vdot, rrHeadDot, alt, altdot
+	
+	#indMat = DataFrame(Int8, length(binSymArray))
+
+	# May want to do this en masse in the calling function instead
+	feat[:rrHeading] = mod(feat[:rrHeading]+360,360);
+
+
+	for symind = 1:length(binSymArray)
+		bins=getHardCodedEdges(binSymArray[symind])
+		j=2
+		while (convert(Array{Float64},feat[binSymArray[symind]])[1]>bins[j]) & (j<length(bins))
+			j+=1
+		end
+		indMat[binSymArray[symind]] = j-1
+	end
+
+	return 0
+end
+
+function convertFeatures2BinMat(datArray::DataFrame; binSymArray::Array{Symbol}=[:range, :dxdt, :rrHeading, :vdot, :rrHeaddot, :alt, :altdot])
+
+	numDatPoints = size(datArray,1)
+	numFeatures = length(binSymArray)
+	indMat = DataFrame()
+	binMat = DataFrame()
+	for i=1:length(binSymArray)
+		binMat[binSymArray[i]]=Array(Int8,numDatPoints)
+		indMat[binSymArray[i]]=Array(Int8,1)
+	end
+
+	for i=1:numDatPoints
+		convertFeature2Bin!(datArray[i,:], indMat, binSymArray=binSymArray)
+		binMat[i,:] = indMat
+	end
+
+	return binMat
+
+end
+
+
+function binFeatures(datArray::DataFrame; datNames::Array{Symbol}=names(datArray), bins::Tuple=(), counts::Array{Float64}=Float64[], defBinCount::Int64=20)
+	# This version of the function would take a data frame of processed data.  This could be read directly from a file (a giant file, perhaps)
+	# datNames is an array of symbols indicating which variables to plot.  If not specified, all columns of datArray will be plotted.
+	# bins is an array of bin edge arrays.  The default value will be used if not specified.
+	# counts is an array of the number of bins to use for each symbol.  If both bins and counts are specified, then bins will be used.
+	# In the case of both bins and counts, the array location should correspond to the symbols specified in datNames
+	# binMat,countMat=binFeatures(tf);
+
+	# The range relative heading, :rrHeading, for some reason has a domain=[-360:360]. So you need to run the following command to rectify it:
+	# rrHead=mod(tf[:,:rrHeading]+360,360);
+
+	#datNames = names(datArray)
+	binMat = ()
+	countMat = Array(Array{Float64},length(datNames))
+
+	for i=1:length(datNames)-1   		# Since the last name is FlightNum, which isn't a data point
+		medVal = median(datArray[:,datNames[i]])
+		minVal = minimum(datArray[:,datNames[i]])
+		maxVal = maximum(datArray[:,datNames[i]])
+
+		figure()
+		title(string(datNames[i]))
+		if !isempty(bins)	
+			b,c = hist(datArray[:,datNames[i]], bins[i])
+		elseif !isempty(counts)
+			b,c = hist(datArray[:,datNames[i]], counts[i])
+		else
+			#binsAuto = minVal:(maxVal-minVal)/(defBinCount+1):maxVal
+			#binsAuto = getAutoBinEdges(datArray[:,datNames[i]], numBins=defBinCount)
+			binsAuto = getHardCodedEdges(datNames[i])
+			b,c = hist(datArray[:,datNames[i]], binsAuto)
+		end
+		bar(b[1:end-1],c)
+
+		binMat = (binMat..., b)
+		countMat[i] = c
+
+	end
+
+	return binMat, countMat
+
+end
+
+function binFeatures()
+# Eventually will need to bin the features (a la histograms) to predict probabilities of transitions, but not sure how this will work.
+# This could read in .jld files and build the bins one-by-one.
+
+	tlogDatArray = DataFrame[]
+	fParamArray = FilterParams[]
+	fileList = readdir(readPath)
+	firstJLD = true
+	firstNames = Symbol[]
+	ind = 1
+	n = length(fileList)
+
+	for i=1:n
+		if length(fileList[i])>5
+	 		if (fileList[i][end-2:end] == "jld")
+	 			if VERBOSE
+		 			display("Loading jld file $i/$n: $(fileList[i]). Writing to $(string(writeFile,outputType))")
+				end
+				tlogDatInterp, filterParams = loadTLog(string(readPath,fileList[i]), VERBOSE=VERBOSE)
+				features = extractFeatures(tlogDatInterp, filterParams=filterParams)
+				features[:,symbol("FlightNum")] = ind*ones(Int64, size(features,1))
+				ind += 1
+				namestlog = names(features)
+
+				# Need to include a header only in the first call to write table.  Should also check to make sure the names are all the same:
+				if firstJLD
+					firstJLD = false
+					firstNames = namestlog
+					writetable(string(writeFile,outputType),features,append=false,header=true)
+				else
+					# Check whether the names match the first names (will continue, however):
+					if any(namestlog.!=firstNames)
+						display("Warning, the names in file $(fileList[i]) don't match the names in the original output file:")
+						display("Names in original file: $firstNames")
+						display("Names in $(fileList[i]): $namestlog")
+					end
+					writetable(string(writeFile,outputType),features,append=true,header=false)
+				end
+
+			end
+		end
+	end
+
+	return 0
+end
+
+function getDeriv(vals::Array{Float64}, t::Array{Float64}; n::Int64=1, k::Int64=1)
+# Returns the kth derivative of vals using n points left and right of the current point
+# Currently just supporting n=1 and k=1.  Would be nice to generalize this to arbitrary derivatives and points.
+	
+	deriv = Array(Float64,length(vals))
+
+	if (k==1) & (n==1)
+		deriv[1] = (vals[2]-vals[1])/(t[2]-t[1])    # Forward difference
+		for i=2:length(vals)-1
+			deriv[i] = (vals[i+1] - vals[i-1])/(t[i+1]-t[i-1])   # Central difference
+		end
+		deriv[end] = (vals[end]-vals[end-1])/(t[end]-t[end-1])   # backward difference
+	else
+		display("Derivative calculation not supported, returning nothing.")
+		deriv = []
+	end
+
+	return deriv
+
+end
+
+function loadTLog(readFile::AbstractString; VERBOSE::Bool=false)
+# This function loads a single tlog jld file specified in the input parameter and returns it as a data frame
+# tlogDatInterp, filterParams = loadTLog("templog.jld");
+
+	tlogDatInterp = DataFrame[]
+	filterParams = FilterParams()
+
+	if length(readFile)>5
+ 		if (readFile[end-2:end] == "jld")
+ 			try
+	 			tlogDatInterp, filterParams = load(readFile, "tlogDatInterp", "filterParams")
+	 		catch
+	 			if VERBOSE
+	 				display("Error reading file $readFile, does not contain tlog data or filter parameters.")
+	 			end
+	 			# do nothing if error
+	 		end
+	 	else
+	 		if VERBOSE
+	 			display("Error reading file $readFile, not a jld file.")
+	 		end
+	 	end
+	 end
+
+	 return tlogDatInterp, filterParams
+
+end
+
+function loadTLogs(;readpath::AbstractString="./", VERBOSE::Bool=false)
+# This function loads all tlog jld files from the specified read path and returns them  in a tlog data array.
+# tlogDatArray, fParamArray = loadTLog(readpath="./")
+
+	tlogDatArray = DataFrame[]
+	fParamArray = FilterParams[]
+	fileList = readdir(readpath)
+
+	for i=1:length(fileList)
+		if length(fileList[i])>5
+	 		if (fileList[i][end-2:end] == "jld")
+	 			if VERBOSE
+		 			display("Found jld file: $(fileList[i])")
+				end
+	 			tlogDatInterp, FilterParams = loadTLog(string(readpath,fileList[i]), VERBOSE=VERBOSE)
+	 			tlogDatArray = [tlogDatArray; tlogDatInterp]
+	 			fParamArray = [fParamArray; filterParams]
+	 		end
+	 	end
+	 end
+
+	 return tlogDatArray, fParamArray
+
+end
 
 function processTLog(;readpath::AbstractString="./", writepath::AbstractString="./", createTextLogs::Bool=false, 
 					  jldSaveNameBase::AbstractString="tlogData", fieldMatchFile::AbstractString="FieldMatchFile.txt", 
 					  VERBOSE::Bool=false, timeKey::AbstractString="time_unix_usec_._mavlink_system_time_t",
 					  maxTlogsinArray::Int64=20, tlogParseExe::AbstractString="./TLogReader.exe", 
-					  filterParams::FilterParams=FilterParams())
+					  filterParams::FilterParams=FilterParams(), successPath::AbstractString="", failPath::AbstractString="")
 # This function can either convert tlog files into text files, or convert the data into
 # Julia data structures and leave off the large text files.  Set createTextLogs to true
-# to retain the text files. If false, they will be deleted.
+# to retain the text files. If false, they will be deleted.  If not empty, successPath will
+# be the locations the .tlog files are moved to when they have been processed into .jld files.
+# If empty then the tlog files will not be moved.  Similarly with failPath, if not empty the
+# files that failed to convert will be moved to this directory.
 # tlogDatArray, udArray, timeKey = processTLog();
-# tlogDatArray, udArray, timeKey = processTLog(readpath="./", writepath="./", createTextLogs=false, jldSaveNameBase="tlogData.jld", fieldMatchFile="FieldMatchFile.txt", VERBOSE=false, timeKey="time_unix_usec_._mavlink_system_time_t");
+# tlogDatArray, udArray, timeKey = processTLog(readpath="./", writepath="./", createTextLogs=false, jldSaveNameBase="tlogData", fieldMatchFile="FieldMatchFile.txt", VERBOSE=false, timeKey="time_unix_usec_._mavlink_system_time_t",successPath="", failPath="");
 
 	outFileName = string(writepath,"templog.txt")
 	tlogDatArray = DataFrame[]
 	udArray = DataArray[]
 	fileList = readdir(readpath)
 	unitDict = getUnitConversions()
+	inputFileName = AbstractString{}
 
 	for i=1:length(fileList)
 		if length(fileList[i])>5
 	 		if fileList[i][end-3:end] == "tlog"
+	 			inputFileName = fileList[i][1:end-5]
+	 			parseSuccess = false
 	 			if VERBOSE
 			 		display("Found tlog file: $(fileList[i])")
 			 	end
@@ -250,44 +709,77 @@ function processTLog(;readpath::AbstractString="./", writepath::AbstractString="
 						tempFrame = readtable(outFileName, separator=',', header=false, names=[:Key,:Val])
 						# Put the data into table format, one row per time stamp (where the time variable is specified in timeKey):
 						# ud is a data array of strings, each of which can be converted to a symbol with symbol(ud[i]) to index tlogDat parameters.
-						tlogDat, ud = convertList2Array(tempFrame, i, filterParams=filterParams)
+						tlogDat, ud = convertList2Array(tempFrame, inputFileName, filterParams=filterParams)
 
 						if isempty(tlogDat)
 							display("Did not find a time key in $(fileList[i]).  Skipping this file.")
 
 						else
 							# Remove the spurrious data points (zero or NaN/missing values, outliers)
-							tlogDat=filterRawData(tlogDat, filterParams=filterParams)
+							if VERBOSE
+								display("Number of track hits before filtering: $(size(tlogDat,1))")
+							end
 
-							# Convert units to aviation units:
-							tlogDat = convertUnits(tlogDat, unitDict)
-
-							# Smooth data using a gaussian kernel:
-							tlogDat=smoothHistories(tlogDat, filterParams=filterParams)
-
-							# Interpolate the data to consistent intervals - 0.5 or 1.0 sec? Piecewise cubic hermite interpolation?
-							tlogDatInterp = interpolateHistories(tlogDat, filterParams=filterParams)
-
-							if !isempty(tlogDatInterp)
-								# Fetch additional data, if possible:
-								#   1. AGL data
-								#   2. Airspace class data
-								#   3. Country location
-								if length(fileList)<=maxTlogsinArray
-									# If there are more than maxTlogsinArray files, don't store everything in one giant data array.  Will
-									# need to plot and analyze trajectories individually through their jld files, I think.
-									push!(tlogDatArray,tlogDatInterp)
-									push!(udArray,ud)
+							if  (in(symbol(filterParams.timeStr), names(tlogDat))) & (size(tlogDat,1)!=0)  		# This shouldn't be necessary, but once the program quit in filterRawData because it didn't have a timeKey...
+								tlogDat=filterRawData(tlogDat, filterParams=filterParams, VERBOSE=VERBOSE)
+								if VERBOSE
+									display("Number of track hits after filtering: $(size(tlogDat,1))")
 								end
 
-								# The jld files are quite large, four tlog files totaled 2.4 MB in .jld, so I'll save them individually.
-								jldSaveName = string(jldSaveNameBase, i, ".jld")
-								@save string(writepath,jldSaveName) tlogDatInterp filterParams
+								#display("$(size(tlogDat))")
+								if  size(tlogDat,1)!=0  	# It's possible that after removing NaNs and zero time stamps we have no data left (that happened with 136076.tlog)
+									# Convert units to aviation units:
+									tlogDat = convertUnits(tlogDat, unitDict)
+
+									# Remove any outliers in time:
+									tlogDat = removeTimeOutliers(tlogDat, filterParams=filterParams, VERBOSE=VERBOSE)
+								
+									# Remove velocity outliers based on position changes (not the actual velocities, 
+									# but perhaps I should check wether those are inconsistent?)  Also removes altitude
+									# outliers based on similar criteria and identical methodology.
+									tlogDat = removeVelOutliers(tlogDat, filterParams=filterParams, VERBOSE=VERBOSE)
+
+									# Smooth data using a gaussian kernel:
+									tlogDat = smoothHistories(tlogDat, filterParams=filterParams)
+
+									# Interpolate the data to consistent intervals - 0.5 or 1.0 sec? Piecewise cubic hermite interpolation?
+									tlogDatInterp = interpolateHistories(tlogDat, filterParams=filterParams)
+
+									if !isempty(tlogDatInterp)
+										# Fetch additional data, if possible:
+										#   1. AGL data
+										#   2. Airspace class data
+										#   3. Country location
+										if length(fileList)<=maxTlogsinArray
+											# If there are more than maxTlogsinArray files, don't store everything in one giant data array.  Will
+											# need to plot and analyze trajectories individually through their jld files, I think.
+											push!(tlogDatArray,tlogDatInterp)
+											push!(udArray,ud)
+										end
+
+										# The jld files are quite large, four tlog files totaled 2.4 MB in .jld, so I'll save them individually.
+										jldSaveName = string(jldSaveNameBase, inputFileName, ".jld")
+										@save string(writepath,jldSaveName) tlogDatInterp filterParams
+										parseSuccess = true
+										if !isempty(successPath)
+											if VERBOSE
+												display("Successfully processed file $(fileList[i]). Moving file to $(string(successPath, fileList[i])) and saving in $(string(writepath,jldSaveName)).")
+											end
+											mv(fileList[i], string(successPath, fileList[i]), remove_destination=true)
+										end
+									end
+								end
 							end
 						end
 					end
 				end
-				
+
+				if (!parseSuccess) & (!isempty(failPath))
+					if VERBOSE
+						display("Failed to process file $(fileList[i]). Moving file to $(string(failPath, fileList[i])).")
+					end
+					mv(fileList[i], string(failPath, fileList[i]), remove_destination=true)
+				end
 				toc()
 		 	end
 		end
@@ -303,38 +795,8 @@ function processTLog(;readpath::AbstractString="./", writepath::AbstractString="
 
 end
 
-function convertList2Array(datList::DataFrame, acNum::Int64; filterParams::FilterParams=FilterParams())
-# Potential options for time stamps (there may be others): 
-#  time_unix_usec_._mavlink_system_time_t, 1445226177730000
-#  time_boot_ms_._mavlink_system_time_t, 241450
-#  time_boot_ms_._mavlink_scaled_pressure_t, 241951
-#  time_boot_ms_._mavlink_attitude_t, 241952
-#  time_boot_ms_._mavlink_global_position_int_t, 254938
-#  time_boot_ms_._mavlink_rc_channels_raw_t, 254941
-#
-# Other variables/keys I'll use (and representative values from one tlog):
- # xacc_._mavlink_raw_imu_t, -8
- # yacc_._mavlink_raw_imu_t, -11
- # zacc_._mavlink_raw_imu_t, -984
- # roll_._mavlink_attitude_t, -0.01629377
- # pitch_._mavlink_attitude_t, -0.03017771
- # yaw_._mavlink_attitude_t, 1.848189
- # rollspeed_._mavlink_attitude_t, -0.005241281
- # pitchspeed_._mavlink_attitude_t, -0.0002181679
- # yawspeed_._mavlink_attitude_t, -0.001133392
- # alt_._mavlink_vfr_hud_t, 0.88
- # lat_._mavlink_gps_raw_int_t, 54566201
- # lon_._mavlink_gps_raw_int_t, 1004433554
- # alt_._mavlink_gps_raw_int_t, 14660
- # eph_._mavlink_gps_raw_int_t, 180
- # epv_._mavlink_gps_raw_int_t, 65535
- # vel_._mavlink_gps_raw_int_t, 1
- # lat_._mavlink_global_position_int_t, 54566163
- # lon_._mavlink_global_position_int_t, 1004433462
- # alt_._mavlink_global_position_int_t, 11070
- # vx_._mavlink_global_position_int_t, 1
- # vy_._mavlink_global_position_int_t, 1
- # vz_._mavlink_global_position_int_t, -1
+function convertList2Array(datList::DataFrame, acStr::AbstractString; filterParams::FilterParams=FilterParams())
+
 
  	timeKey = filterParams.timeStr
 	datArray = DataFrame()
@@ -344,9 +806,8 @@ function convertList2Array(datList::DataFrame, acNum::Int64; filterParams::Filte
 	numTimeElems = sum(datList[:,:Key].==timeKey)
  	for i=1:length(ud) 
  		datArray[symbol(ud[i])]=DataArray(Float64,numTimeElems)
- 		#datArray[:,symbol(ud[i])] = NA
  	end
-	datArray[symbol("acNum")]=acNum*ones(Float64,numTimeElems)
+	datArray[symbol("acNum")]=DataArray(repmat([acStr], numTimeElems))
 
 	timeInd = 0
 	for i=1:size(datList,1)
@@ -373,38 +834,50 @@ function  convertUnits(datArray::DataFrame, unitDict::Dict{Symbol,Float64})
 # in unitDict are multiplied by the default tlog values to get aviation units.
 
 	for sym in names(datArray)
-		datArray[:,sym] = datArray[:,sym].*get(unitDict, sym, 1)  	# If we don't have the conversion, leave it unchanged
+		datArray[:,sym] = getConversion(datArray[:,sym], get(unitDict, sym, 1))  	# If we don't have the conversion, leave it unchanged
 	end
 
 	return datArray
 
 end
 
-function filterRawData(datArray::DataFrame; filterParams::FilterParams=FilterParams())
+function getConversion(datArray::DataArray{Float64,1},  convFactor::Int64)
+	return datArray.*convFactor
+end
+
+function getConversion(datArray::DataArray{Float64,1},  convFactor::Float64)
+	return datArray.*convFactor
+end
+
+function getConversion(datArray::DataArray{ASCIIString,1},  convFactor::Int64)
+	# If the input is an array of strings (i.e. the ac string identifier), then don't multiply it, just return the array.
+	return datArray
+end
+
+function filterRawData(datArray::DataFrame; filterParams::FilterParams=FilterParams(), VERBOSE::Bool=false)
 # This function does all the processing and filtering on the raw data to get it into a usable format:
 #	1. Remove the time stamps that are zero (there may be multiple, which make the data unusable)
-#	2. Remove position locations that greatly increase the path length (these are probably spurrious)
+#	2. Remove position locations that greatly increase the path length (these are probably spurrious) based on the velocity that track hit would imply
+#	3. Remove altitude hits that have very lange altitude rates (these are probably spurrious)
+# 	4. Remove time stamps that are excessively large by looking at their z-scores (maximum z-score for a sequential list starting at 0 should be about 1.79)
+#	5. Remove combinations of lat/long that are (0,0).  These are probably dropouts.
 
 	# Remove the NaNs from the key parameters, the zeros from the timeKey, and (0,0) entries from lat/longs
 	timeKey=filterParams.timeStr
 	goodInds = collect(1:size(datArray,1))
 	zeroInds = find(datArray[:,symbol(timeKey)].==0)
-	zeroLLInds = find((datArray[:,symbol(filterParams.keyParams[filterParams.latParam])].==0) & (datArray[:,symbol(filterParams.keyParams[filterParams.lonParam])].==0))
+	zeroLLInds = find((datArray[:,symbol(filterParams.params2Smooth[filterParams.latParam])].==0) & (datArray[:,symbol(filterParams.params2Smooth[filterParams.lonParam])].==0))
 	naInds=Int64[]
-	for prm in filterParams.keyParams
+	for prm in filterParams.params2Smooth
 		if sum(symbol(prm).==names(datArray))>0    # Check whether this parameter is actually in the data set
 			naInds = [naInds; find(isna(datArray[:,symbol(prm)]))]
 		end
 	end
+
 	deleteat!(goodInds,sort(unique([naInds ; zeroInds; zeroLLInds])))
 	datArray = datArray[goodInds, :]
 
-	# Convert values into appropriate units?  Would be nice no to worry about those here.
-
 	# skipping this check for now: check for positions that greatly increase path distance (i.e. remove outliers):
-
-	# Remove velocity outliers based on position changes (not the actual velocities, but perhaps I should check wether those are inconsistent?)
-	datArray = removeVelOutliers(datArray, filterParams=filterParams)
 
 	# Remove missing altitudes, excessive vertical rates
 
@@ -413,18 +886,176 @@ function filterRawData(datArray::DataFrame; filterParams::FilterParams=FilterPar
 	return datArray
 end
 
-# Start this on 12/11
-function removeVelOutliers(datArray::DataFrame; filterParams::FilterParams=FilterParams())
-	# May not need to do this, don't see very many points that have giant velocities for one step, perhaps
-	# because we're directly recording velocity and not estimating it from positions and times.
+function removeTimeOutliers(datArray::DataFrame; filterParams::FilterParams=FilterParams(), VERBOSE::Bool=false)
+	# Check for outliers in the time stamps.  Need to do this after removing nans so we don't get nan as the answer here:
+	ts = datArray[:,symbol(filterParams.timeStr)].-datArray[1,symbol(filterParams.timeStr)]
+	zts, maxInd = findmax((ts.-mean(ts))/std(ts))
+	while zts > 5.0
+		# In a roughly sequential list of numbers starting at 0, the largest element will have a z-value of about 1.79
+		# Take out any elements with a greater z-value than this.  Don't know whether I should check for negative values too.
+		if VERBOSE
+			display("Removing a time stamp that was excessively large: $(ts[maxInd]) has a z-score of $zts.")
+		end
+		goodInds=collect(1:size(datArray,1))
+		deleteat!(goodInds,maxInd)
+		datArray = datArray[goodInds, :]
+		ts = datArray[:,symbol(filterParams.timeStr)].-datArray[1,symbol(filterParams.timeStr)]
+		zts, maxInd = findmax((ts.-mean(ts))/std(ts))
+	end
 
-	# Mykel removed outliers for both the horizontal and vertical velocities.  Will skip this for now.
+	return datArray
+end
+
+function removeVelOutliers(datArray::DataFrame; filterParams::FilterParams=FilterParams(), VERBOSE::Bool=false)
+	# May not need to do this, don't see very many points that have giant velocities for one step, perhaps
+	# because we're directly recording velocity and not estimating it from positions and times. 
+	# Uses the following thresholds in filterParams:
+	# maxDrDtThreshold = 200. * 6071/3600 	# Maximum horizontal velocity between position reports (given dt) that is allowable.
+	# maxDrDtThreshold = 3000. * 1/60 	# Maximum horizontal velocity between position reports (given dt) that is allowable.
+	timeHist = convert(Array, datArray[:,symbol(filterParams.timeStr)])
+	lat = convert(Array, datArray[:,symbol(filterParams.latStr)])
+	lon = convert(Array, datArray[:,symbol(filterParams.lonStr)])
+
+	# Remove the position outliers, based on observed distance between track hits and time stamps
+	x,y = convertLL2XY(lat,lon)
+	dx = diff(x)
+	dy = diff(y)
+	dR = sqrt(dx.^2+dy.^2)
+	dt = diff(timeHist)
+	dRdT = dR./dt     	# This is an estimate of the velocity at each time step.
+
+	# highInds will be an array of points on either side of the high velocity segments.
+	highInds = find(dRdT.>filterParams.maxDrDtThreshold)   # Get indicies of those steps that have greater velocity than indicated threshold
+	highInds = unique([highInds; highInds+1])     # Now also include the "next" data point becaues it also contributes to the high velocity.  Remove duplicates
+
+	while !isempty(highInds)
+		speedRedux = Array(Float64,length(highInds))
+		for i=1:length(highInds)
+			speedRedux[i] = getSpeedReduction(x,y,timeHist, highInds[i], filterParams.maxDrDtThreshold)
+		end
+		maxRedux, maxInd = findmax(speedRedux)
+
+		if VERBOSE
+			display("Removing element $(highInds[maxInd]), resulting in a net speed reduction of $maxRedux ft/s.  Candidate elements = $(length(highInds))")
+		end
+
+		# Remove the worst offender
+		goodInds = collect(1:size(datArray,1))
+		deleteat!(goodInds,highInds[maxInd])
+		datArray = datArray[goodInds, :]
+
+		if VERBOSE
+			display("New number of track hits is $(size(datArray,1))")
+		end
+
+		# Re-calculate the path distances (most will not have changed, can I do this more efficiently? )
+		timeHist = convert(Array, datArray[:,symbol(filterParams.timeStr)])
+		lat = convert(Array, datArray[:,symbol(filterParams.latStr)])
+		lon = convert(Array, datArray[:,symbol(filterParams.lonStr)])
+		x,y = convertLL2XY(lat,lon)
+		dx = diff(x)
+		dy = diff(y)
+		dR = sqrt(dx.^2+dy.^2)
+		dt = diff(timeHist)
+		dRdT = dR./dt     	# This is an estimate of the velocity at each time step.
+
+		# highInds will be an array of points on either side of the high velocity segments.
+		highInds = find(dRdT.>filterParams.maxDrDtThreshold)   # Get indicies of those steps that have greater velocity than indicated threshold
+		highInds = unique([highInds; highInds+1]) 
+	end
+
+	# Now remove the altitude outliers, based on observed altitudes between track hits and time stamps
+	alt = convert(Array, datArray[:,symbol(filterParams.altStr)])
+	timeHist = convert(Array, datArray[:,symbol(filterParams.timeStr)])
+
+	dh = diff(alt)
+	dt = diff(timeHist)
+	dHdT = dh./dt     	# This is an estimate of the altitude rate at each time step.
+
+	# highInds will be an array of points on either side of the high altitude rate segments.
+	highInds = find(abs(dHdT).>filterParams.maxDhDtThreshold)   # Get indicies of those steps that have greater velocity than indicated threshold
+	highInds = unique([highInds; highInds+1])     # Now also include the "next" data point becaues it also contributes to the high velocity.  Remove duplicates
+
+	while !isempty(highInds)
+		speedRedux = Array(Float64,length(highInds))
+		for i=1:length(highInds)
+			speedRedux[i] = getAltRateReduction(alt,timeHist, highInds[i], filterParams.maxDhDtThreshold)
+		end
+		maxRedux, maxInd = findmax(speedRedux)
+
+		if VERBOSE
+			display("Removing element $(highInds[maxInd]), resulting in a net altitude rate reduction of $maxRedux ft/s.  Candidate elements = $(length(highInds))")
+		end
+
+		# Remove the worst offender
+		goodInds = collect(1:size(datArray,1))
+		deleteat!(goodInds,highInds[maxInd])
+		datArray = datArray[goodInds, :]
+
+		if VERBOSE
+			display("New number of track hits is $(size(datArray,1))")
+		end
+
+		# Re-calculate the altitudes distances (most will not have changed, can I do this more efficiently? )
+		alt = convert(Array, datArray[:,symbol(filterParams.altStr)])
+		timeHist = convert(Array, datArray[:,symbol(filterParams.timeStr)])
+
+		dh = diff(alt)
+		dt = diff(timeHist)
+		dHdT = dh./dt     	# This is an estimate of the altitude rate at each time step.
+
+		# highInds will be an array of points on either side of the high altitude rate segments.
+		highInds = find(abs(dHdT).>filterParams.maxDhDtThreshold)   # Get indicies of those steps that have greater velocity than indicated threshold
+		highInds = unique([highInds; highInds+1])     # Now also include the "next" data point becaues it also contributes to the high velocity.  Remove duplicates
+
+	end
+
+
 	return datArray
 
 end
 
+function getSpeedReduction(x::Array{Float64}, y::Array{Float64}, t::Array{Float64}, remInd::Int64, speedThreshold::Float64)
+# Return the reduction in speed, over the threshold, that comes from removing the given index.  Can do this by looking only at the
+# values at remInd and its immediate neighbors.
+
+	speedRedux = 0.  
+	if remInd==1
+		# Removing the first point, easy calculation:
+		speedRedux = max(0., sqrt((x[2]-x[1])^2+(y[2]-y[1])^2)/(t[2]-t[1]) - speedThreshold)
+	elseif (remInd<length(x))
+		speedRedux = max(0., sqrt((x[remInd]-x[remInd-1])^2+(y[remInd]-y[remInd-1])^2)/(t[remInd]-t[remInd-1]) +
+		   			 		 sqrt((x[remInd]-x[remInd+1])^2+(y[remInd]-y[remInd+1])^2)/(t[remInd+1]-t[remInd]) -
+					 		 sqrt((x[remInd-1]-x[remInd+1])^2+(y[remInd-1]-y[remInd+1])^2)/(t[remInd+1]-t[remInd-1]) - 
+					 		 speedThreshold)
+	else
+		speedRedux = max(0., sqrt((x[remInd]-x[remInd-1])^2+(y[remInd]-y[remInd-1])^2)/(t[remInd]-t[remInd-1]) - speedThreshold)
+	end
+
+	return speedRedux
+end	
+
+function getAltRateReduction(h::Array{Float64}, t::Array{Float64}, remInd::Int64, speedThreshold::Float64)
+# Return the reduction in speed, over the threshold, that comes from removing the given index.  Can do this by looking only at the
+# values at remInd and its immediate neighbors.
+
+	speedRedux = 0.  
+	if remInd==1
+		# Removing the first point, easy calculation:
+		speedRedux = max(0., abs(h[2]-h[1])/(t[2]-t[1]) - speedThreshold)
+	elseif (remInd<length(h))
+		speedRedux = max(0., abs(h[remInd]-h[remInd-1])/(t[remInd]-t[remInd-1]) +
+		   			 		 abs(h[remInd+1]-h[remInd])/(t[remInd+1]-t[remInd]) -
+					 		 abs(h[remInd+1]-h[remInd-1])/(t[remInd+1]-t[remInd-1]) - 
+					 		 speedThreshold)
+	else
+		speedRedux = max(0., abs(h[remInd]-h[remInd-1])/(t[remInd]-t[remInd-1]) - speedThreshold)
+	end
+
+	return speedRedux
+end	
+
 function smoothHistories(datArray::DataFrame; filterParams::FilterParams=FilterParams())
-# Throw away the points that don't have enough smoothing points before or after them?
 # Don't go through every point with the filter, limit it to +-4 standard deviations from current point
 
 	timeKey = filterParams.timeStr
@@ -440,9 +1071,6 @@ function smoothHistories(datArray::DataFrame; filterParams::FilterParams=FilterP
 			
 			#filtParam = Array(Float64,length(rawParam))
 			for i=1:length(rawParam)
-				#fill!(w, 0.)
-				# wSum = 0.
-				# dotProd = 0.
 				minIndSmooth = maximum([1, i-deltaInd])
 				maxIndSmooth = minimum([length(rawParam), i+deltaInd])
 				
@@ -527,6 +1155,9 @@ function interpolateHistories(datArray::DataFrame; filterParams::FilterParams=Fi
 # not the spline-based.  This doesn't look very good, but perhaps as a first pass to start trying to train 
 # the bayes nets I can use linear?  In the meantime I can develop or find an interpolation scheme that works
 # with irregularly space grid points.
+
+# Should I sort timeHist if it's not sorted, would that work ok?
+
 
 	# Pre allocate space, if possible, using dt and time history data.
 	timeHist = convert(Array, datArray[:,symbol(filterParams.timeStr)])
@@ -637,205 +1268,6 @@ function plotTLogData(tlogDatArray::Array{DataFrame}; filterParams::FilterParams
 
 end	
 
-# The following are deprecated, use the version that passes in FilterParams rather than timeKey
-function plotTLogData(tlogDatArray::DataFrame, timeKey::AbstractString)
-	plotTLogData([tlogDatArray], timeKey)
-end
-
-function plotTLogData(tlogDatArray::Array{DataFrame}, timeKey::AbstractString)
-
-	latrawStr = "lat_._mavlink_gps_raw_int_t"
-    lonrawStr = "lon_._mavlink_gps_raw_int_t"
-	altrawStr = "alt_._mavlink_gps_raw_int_t"
-	velrawStr = "vel_._mavlink_gps_raw_int_t"
-
-	latglbStr = "lat_._mavlink_global_position_int_t"
-    longlbStr = "lon_._mavlink_global_position_int_t"
-	altglbStr = "alt_._mavlink_global_position_int_t"
-
-	vxStr = "vx_._mavlink_global_position_int_t"
-	vyStr = "vy_._mavlink_global_position_int_t"
-	vzStr = "vz_._mavlink_global_position_int_t"
-	hdgStr = "hdg_._mavlink_global_position_int_t"
-
-	aspdStr = "airspeed_._mavlink_vfr_hud_t"
-	climbStr = "climb_._mavlink_vfr_hud_t"
-
-
-	for i=1:length(tlogDatArray)
-
-		# # Plot the raw lat/lon traces:
-		# goodInds = collect(1:size(tlogDatArray[i],1))
-		# latInds = find(isna(tlogDatArray[i][:,symbol(latrawStr)]))
-		# lonInds = find(isna(tlogDatArray[i][:,symbol(lonrawStr)]))
-		# naInds = unique([latInds,lonInds])
-		# #display("i=$i, $naInds")
-		# deleteat!(goodInds,naInds)
-
-		# lon = convert(Array, tlogDatArray[i][goodInds,symbol(lonrawStr)])./10^7
-		# lat = convert(Array, tlogDatArray[i][goodInds,symbol(latrawStr)])./10^7
-		# figure()
-		# # plot(lon-mean(lon), lat-mean(lat),"r")
-		# plot(lon, lat,"r")
-		# xlabel("Longitude (??)")
-		# ylabel("Latitude (??)")
-
-		# Now overplot the gps lat/lon traces
-		goodInds = collect(1:size(tlogDatArray[i],1))
-		latInds = find(isna(tlogDatArray[i][:,symbol(latglbStr)]))
-		lonInds = find(isna(tlogDatArray[i][:,symbol(longlbStr)]))
-		naInds = unique([latInds,lonInds])
-		deleteat!(goodInds,naInds)
-		# lon = convert(Array, tlogDatArray[i][goodInds,symbol(longlbStr)])./10^7
-		# lat = convert(Array, tlogDatArray[i][goodInds,symbol(latglbStr)])./10^7
-		lon = convert(Array, tlogDatArray[i][goodInds,symbol(longlbStr)])
-		lat = convert(Array, tlogDatArray[i][goodInds,symbol(latglbStr)])
-		#plot(lon, lat,"b")
-
-		# Plot x and y:
-		# Use x and y converted from lat/long global positon, lat_._mavlink_global_position_int_t
-		x,y = convertLL2XY(lat,lon)
-		figure()
-		# plot(lon-mean(lon), lat-mean(lat),"r")
-		plot(x, y,"g")
-		xlabel("X (ft)")
-		ylabel("Y (ft)")
-
-		# Plot alt vs. time
-		# Not sure what to do about altitude.  GPS altitude seems a bit better, but frequently
-		# we've got altitudes of something like 6000 m.  And we get altitude changes that wolud
-		# require climb rates of 100 m/s. Might there be a different scaling factor for some files?
-		goodInds = collect(1:size(tlogDatArray[i],1))
-		altInds = find(isna(tlogDatArray[i][:,symbol(altrawStr)]))
-		timeInds = find(isna(tlogDatArray[i][:,symbol(timeKey)]))
-		naInds = unique([altInds, timeInds])
-		deleteat!(goodInds,naInds)
-
-		# alt = convert(Array, tlogDatArray[i][goodInds,symbol(altrawStr)])./10^2
-		# timeHist = convert(Array, tlogDatArray[i][goodInds,symbol(timeKey)])./10^6
-		alt = convert(Array, tlogDatArray[i][goodInds,symbol(altrawStr)])
-		timeHist = convert(Array, tlogDatArray[i][goodInds,symbol(timeKey)])
-		figure()
-		plot(timeHist-timeHist[1], alt, "r")
-		xlabel("Time (s)")
-		ylabel("Altitude (ft)")
-
-		# Now overplot the gps altitude:
-		# Gps altitude better?
-		goodInds = collect(1:size(tlogDatArray[i],1))
-		altInds = find(isna(tlogDatArray[i][:,symbol(altglbStr)]))
-		timeInds = find(isna(tlogDatArray[i][:,symbol(timeKey)]))
-		naInds = unique([altInds, timeInds])
-		deleteat!(goodInds,naInds)
-		# alt = convert(Array, tlogDatArray[i][goodInds,symbol(altglbStr)])./10^2
-		# timeHist = convert(Array, tlogDatArray[i][goodInds,symbol(timeKey)])./10^6
-		alt = convert(Array, tlogDatArray[i][goodInds,symbol(altglbStr)])
-		timeHist = convert(Array, tlogDatArray[i][goodInds,symbol(timeKey)])
-		plot(timeHist-timeHist[1], alt, "b")
-
-		# Plot velocity vs. time
-		# use vx and vy components to get net velocity
-		goodInds = collect(1:size(tlogDatArray[i],1))
-		velInds = find(isna(tlogDatArray[i][:,symbol(velrawStr)]))
-		timeInds = find(isna(tlogDatArray[i][:,symbol(timeKey)]))
-		naInds = unique([timeInds, velInds])
-		deleteat!(goodInds,naInds)
-		# timeHist = convert(Array, tlogDatArray[i][goodInds,symbol(timeKey)])./10^6
-		# vel = convert(Array, tlogDatArray[i][goodInds,symbol(velrawStr)])./10^2
-		timeHist = convert(Array, tlogDatArray[i][goodInds,symbol(timeKey)])
-		vel = convert(Array, tlogDatArray[i][goodInds,symbol(velrawStr)])
-		figure()
-		plot(timeHist-timeHist[1], vel, "r")
-		xlabel("Time (s)")
-		ylabel("Velocity (kts)")
-
-		# Plot magnitude of components of velocity (vx,vy) 
-		goodInds = collect(1:size(tlogDatArray[i],1))
-		vxInds = find(isna(tlogDatArray[i][:,symbol(vxStr)]))
-		vyInds = find(isna(tlogDatArray[i][:,symbol(vyStr)]))
-		timeInds = find(isna(tlogDatArray[i][:,symbol(timeKey)]))
-		naInds = unique([timeInds, vxInds, vyInds])
-		deleteat!(goodInds,naInds)
-		# timeHist = convert(Array, tlogDatArray[i][goodInds,symbol(timeKey)])./10^6
-		timeHist = convert(Array, tlogDatArray[i][goodInds,symbol(timeKey)])
-		velGlobal = (tlogDatArray[i][goodInds,symbol(vxStr)].^2+tlogDatArray[i][goodInds,symbol(vyStr)].^2).^0.5
-		# vel = convert(Array, velGlobal)./10^2
-		vel = convert(Array, velGlobal)
-		plot(timeHist-timeHist[1], vel, "b")
-
-		# Plot airspeed vs. time 
-		goodInds = collect(1:size(tlogDatArray[i],1))
-		aspdInds = find(isna(tlogDatArray[i][:,symbol(aspdStr)]))
-		timeInds = find(isna(tlogDatArray[i][:,symbol(timeKey)]))
-		naInds = unique([timeInds, aspdInds])
-		deleteat!(goodInds,naInds)
-		# timeHist = convert(Array, tlogDatArray[i][goodInds,symbol(timeKey)])./10^6
-		timeHist = convert(Array, tlogDatArray[i][goodInds,symbol(timeKey)])
-		vel = convert(Array, tlogDatArray[i][goodInds,symbol(aspdStr)])
-		plot(timeHist-timeHist[1], vel, "g")
-		legend(("Raw vel","Global vel","Airspeed"))
-
-		# Plot vertical gps velocity vs. time (probably won't be good)
-		goodInds = collect(1:size(tlogDatArray[i],1))
-		vvelInds = find(isna(tlogDatArray[i][:,symbol(vzStr)]))
-		timeInds = find(isna(tlogDatArray[i][:,symbol(timeKey)]))
-		naInds = unique([timeInds, vvelInds])
-		deleteat!(goodInds,naInds)
-		# timeHist = convert(Array, tlogDatArray[i][goodInds,symbol(timeKey)])./10^6
-		# vel = convert(Array, tlogDatArray[i][goodInds,symbol(vzStr)])./10^2
-		timeHist = convert(Array, tlogDatArray[i][goodInds,symbol(timeKey)])
-		vel = convert(Array, tlogDatArray[i][goodInds,symbol(vzStr)])
-		figure()
-		plot(timeHist-timeHist[1], vel, "b")
-		xlabel("Time (s)")
-		ylabel("Vertical Velocity (ft/min)")
-
-		# Plot Climb vs. time 
-		goodInds = collect(1:size(tlogDatArray[i],1))
-		climbInds = find(isna(tlogDatArray[i][:,symbol(climbStr)]))
-		timeInds = find(isna(tlogDatArray[i][:,symbol(timeKey)]))
-		naInds = unique([timeInds, climbInds])
-		deleteat!(goodInds,naInds)
-		# timeHist = convert(Array, tlogDatArray[i][goodInds,symbol(timeKey)])./10^6
-		timeHist = convert(Array, tlogDatArray[i][goodInds,symbol(timeKey)])
-		vel = convert(Array, tlogDatArray[i][goodInds,symbol(climbStr)])
-		plot(timeHist-timeHist[1], vel, "r")
-
-		# Plot dh/dt vs. time 
-		goodInds = collect(1:size(tlogDatArray[i],1))
-		altInds = find(isna(tlogDatArray[i][:,symbol(altglbStr)]))
-		timeInds = find(isna(tlogDatArray[i][:,symbol(timeKey)]))
-		naInds = unique([timeInds, altInds])
-		deleteat!(goodInds,naInds)
-		# timeHist = convert(Array, tlogDatArray[i][goodInds,symbol(timeKey)])./10^6
-		# alt = convert(Array, tlogDatArray[i][goodInds,symbol(altglbStr)])./10^2
-		timeHist = convert(Array, tlogDatArray[i][goodInds,symbol(timeKey)])
-		alt = convert(Array, tlogDatArray[i][goodInds,symbol(altglbStr)])
-		dh = diff(alt)
-		dt = diff(timeHist)
-		dhdt = dh./dt .*1./60.  # Convert from ft/s to ft/min
-		plot(timeHist[2:end]-timeHist[1], dhdt, "g")
-		legend(("GPS vz", "Climb rate", "dh/dt"))
-
-		# Plot time steps:
-		# timeHist = tlogDatArray[i][:,symbol(timeKey)]./10^6
-		timeHist = tlogDatArray[i][:,symbol(timeKey)]
-		dt = diff(timeHist)
-		figure()
-		plot(timeHist[2:end]-timeHist[1], dt)
-		xlabel("Time (s)")
-		ylabel("Time between consecutive time stamps (s)")
-	end
-
-
-	latStr = "lat_._mavlink_global_position_int_t"
-	lonStr = "lon_._mavlink_global_position_int_t"
-	altStr = "alt_._mavlink_global_position_int_t"
-
-	return 0
-
-end	
-
 function convertLL2XY(lat,lon)
 # Uses the first point as the origin, then uses simple curvilinear approx to get x,y
 	Re = 6371000*3.28
@@ -853,6 +1285,38 @@ function convertLL2XY(lat,lon)
 
 	return x,y
 end	
+
+# Potential options for time stamps (there may be others): 
+#  time_unix_usec_._mavlink_system_time_t, 1445226177730000
+#  time_boot_ms_._mavlink_system_time_t, 241450
+#  time_boot_ms_._mavlink_scaled_pressure_t, 241951
+#  time_boot_ms_._mavlink_attitude_t, 241952
+#  time_boot_ms_._mavlink_global_position_int_t, 254938
+#  time_boot_ms_._mavlink_rc_channels_raw_t, 254941
+#
+# Other variables/keys I'll use (and representative values from one tlog):
+ # xacc_._mavlink_raw_imu_t, -8
+ # yacc_._mavlink_raw_imu_t, -11
+ # zacc_._mavlink_raw_imu_t, -984
+ # roll_._mavlink_attitude_t, -0.01629377
+ # pitch_._mavlink_attitude_t, -0.03017771
+ # yaw_._mavlink_attitude_t, 1.848189
+ # rollspeed_._mavlink_attitude_t, -0.005241281
+ # pitchspeed_._mavlink_attitude_t, -0.0002181679
+ # yawspeed_._mavlink_attitude_t, -0.001133392
+ # alt_._mavlink_vfr_hud_t, 0.88
+ # lat_._mavlink_gps_raw_int_t, 54566201
+ # lon_._mavlink_gps_raw_int_t, 1004433554
+ # alt_._mavlink_gps_raw_int_t, 14660
+ # eph_._mavlink_gps_raw_int_t, 180
+ # epv_._mavlink_gps_raw_int_t, 65535
+ # vel_._mavlink_gps_raw_int_t, 1
+ # lat_._mavlink_global_position_int_t, 54566163
+ # lon_._mavlink_global_position_int_t, 1004433462
+ # alt_._mavlink_global_position_int_t, 11070
+ # vx_._mavlink_global_position_int_t, 1
+ # vy_._mavlink_global_position_int_t, 1
+ # vz_._mavlink_global_position_int_t, -1
 
 # Found new key: time_unix_usec_._mavlink_system_time_t
 # Found new key: time_boot_ms_._mavlink_system_time_t
