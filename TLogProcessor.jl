@@ -1,4 +1,6 @@
 using HDF5, JLD, DataFrames, DataArrays, PyPlot, Interpolations, Dierckx
+import Requests: get, readall
+
 
 # This program is desigen to process Mission Planner .tlog files into Julia data structures.  It relys on calls
 # to the C# programe TLogReader.exe, which converts the tlog file into a text file.  The usage for that program is:
@@ -34,9 +36,15 @@ using HDF5, JLD, DataFrames, DataArrays, PyPlot, Interpolations, Dierckx
 # 11. Rename the output jld files to match the input names, but with a tlogDat prefix.  Otherwise we're over-writing the files.
 
 # Work flow:
-# 1. processTlog() takes in a .tlog file/folder and writes the tlog data (not features) and filter parameters to a .jld file. If the number of input files is smaller than a user-selectable parameter (20), then it also returns an array of that data.
-# 2. featureFolder2csv() will read in a set of .jld files and write to a single, giant csv file the features contained in the .jld tlog file.
+# 0. Writing a single function (convertTLogs2FeatureCSV) to read in all the tlog files, process them and output to a giant csv file. That should cover the two following steps.
+# 0.1 processTlog() takes in a .tlog file/folder and writes the tlog data (not features) and filter parameters to a .jld file. If the number of input files is smaller than a user-selectable parameter (20), then it also returns an array of that data.
+# 0.2 featureFolder2csv() will read in a set of .jld files and write to a single, giant csv file the features contained in the .jld tlog file.
 # 3. plotTlogData() takes in a tlogDat data frame or array of data frames and plots the most interesting state variable histories.
+# 4. You can manually store the features you want by loading the whole csv feature file into julia as a data frame and copying only those features you want into a new frame (see featureTable20151221.jld)
+# 5. Look at the distribution of features (perhaps smoothing them or removing some, though I don't currently do this) and select appropriate bins.  I've done this for all but the t+1 variables in getHardCodedBin...  You can investigate the distributions with binFeatures()
+# 6. Convert the features into bins with convertFeatures2BinMat().  This will store the features as the Int8 representation of which index in the histogram they are, which will be much smaller that the original feature file (for 550 flights, 82 MB rather than 1.02 GB)
+# 7. Haven't yet written out the binned features to a csv, need to look into GeNie to see what it wants.  I think it can work directly on the feature values.
+# 8. If you've got a bunch of jld files without terrain elevations, you can run addTerrain2JLD to lookup the elevations and add them to the jld files. You can then proceed with creation of the csv file (featureFolder2csv())
 
 type FilterParams
 
@@ -191,11 +199,67 @@ function getUnitConversions()
 
 end
 
-function extractFeatures(tlogDatArray::DataFrame; filterParams::FilterParams=FilterParams())
-	return extractFeatures([tlogDatArray], filterParams=filterParams)[1]
+function convertTLogs2FeatureCSV(;readpathTLog::AbstractString="./", writepathJLD::AbstractString="./", createTextLogs::Bool=false, 
+					  jldSaveNameBase::AbstractString="tlogData", fieldMatchFile::AbstractString="FieldMatchFile.txt", 
+					  VERBOSE::Bool=false, timeKey::AbstractString="time_unix_usec_._mavlink_system_time_t",
+					  maxTlogsinArray::Int64=20, tlogParseExe::AbstractString="./TLogReader.exe", 
+					  filterParams::FilterParams=FilterParams(), successPathTLog::AbstractString="", failPathTLog::AbstractString="",
+					  writeFileCSV::AbstractString="./featureHistory", outputType::AbstractString=".csv", redoElevations::Bool=false,
+					  elevMethod::AbstractString="centroid", prependElevJLD::AbstractString="")
+	# Single function that batch processes tlog files, moving them if desired in the process, then extracts the features and 
+	# writes to a CSV file that is suitable for GeNie.  Basically lumps in two functions, processTLog (inputs tlog files,
+	# outputs .jld files with basic track info) and featureFolder2CSV (inputs tracks, outputs a CSV of features).  If you decide you need
+	# to call the elevation database again (perhaps your jld files didn't originally have elevation information), then set redoElevations 
+	# to true.  In this case you may also specify the elevation method to use and what to prepend to the new files to distinguish them
+	# from the old JLD files.  If you specify "" then the old files will be over-written.
+	
+	# Basic operation:
+	#  tlogDatArray, successParses, failParses = convertTLogs2FeatureCSV(readpath="./", writepath="./jldfiles/", createTextLogs=false, jldSaveNameBase="tlogData", fieldMatchFile="FieldMatchFile.txt", VERBOSE=false, timeKey="time_unix_usec_._mavlink_system_time_t",successPath="./convertedTLogs/", failPath="./failedTLogs/",VERBOSE=true, tlogParseExe="../TLogReader.exe");
+
+	# Eric's version for batch processing:
+	# readpathTLog="/home/emueller/ACAS/EncounterModel/Data/tlog/"
+	# writepathJLD="/home/emueller/ACAS/EncounterModel/Data/jldData/"
+	# fieldMatchFile="FieldMatchFile.txt"    # Remember, this gets readpathTLog prepended to it (probably shouldn't but it does)
+	# tlogParseExe="/home/emueller/.julia/v0.3/CA2DRP/src/TLogReader.exe"
+	# successPathTLog="/home/emueller/ACAS/EncounterModel/Data/tlog/successTLogConvert/"
+	# failPathTLog="/home/emueller/ACAS/EncounterModel/Data/tlog/failTLogConvert/"
+	# writeFileCSV="/home/emueller/ACAS/EncounterModel/Data/FeatureHistory20151228"
+	# tlogDatArray, successParses, failParses = convertTLogs2FeatureCSV(readpathTLog=readpathTLog, writepathJLD=writepathJLD, fieldMatchFile=fieldMatchFile, VERBOSE=true, tlogParseExe=tlogParseExe,successPathTLog=successPathTLog,failPathTLog=failPathTLog, writeFileCSV=writeFileCSV, redoElevations=false);
+
+
+	tlogDatArray, successParses, failParses = processTLog(readpath=readpathTLog, writepath=writepathJLD, createTextLogs=createTextLogs, 
+												  jldSaveNameBase=jldSaveNameBase, fieldMatchFile=fieldMatchFile, 
+												  VERBOSE=VERBOSE, timeKey=timeKey, maxTlogsinArray=maxTlogsinArray, tlogParseExe=tlogParseExe, 
+												  filterParams=filterParams, successPath=successPathTLog, failPath=failPathTLog)
+
+	if VERBOSE
+		display("Completed conversion of tlogs to tracks in jld files.")
+		display("Out of $(successParses+failParses) files, $(successParses) were successfully parsed and $failParses were not.")
+	end
+
+	if redoElevations
+		addTerrain2JLD(readPath=writepathJLD, writePath=writepathJLD, elevMethod=elevMethod, jldSaveNameBase=prependElevJLD, VERBOSE=VERBOSE)
+	end
+
+	featureFolder2csv(readPath=writepathJLD, writeFile=writeFileCSV, outputType=outputType, VERBOSE=VERBOSE)
+
+	return tlogDatArray, successParses, failParses
 end
 
-function extractFeatures(tlogDatArray::Array{DataFrame}; filterParams::FilterParams=FilterParams())
+function extractFeatures(tlogDatArray::DataFrame; filterParams::FilterParams=FilterParams(), terrainElev::Float64=NaN)
+	return extractFeatures([tlogDatArray], filterParams=filterParams, terrainElev=[DataArray([terrainElev])])[1]
+end
+
+function extractFeatures(tlogDatArray::DataFrame; filterParams::FilterParams=FilterParams(), terrainElev::Array{Float64}=Float64[])
+	return extractFeatures([tlogDatArray], filterParams=filterParams, terrainElev=[DataArray(terrainElev)])[1]
+end
+
+function extractFeatures(tlogDatArray::DataFrame; filterParams::FilterParams=FilterParams(), terrainElev::DataArray=DataArray[])
+	return extractFeatures([tlogDatArray], filterParams=filterParams, terrainElev=[terrainElev])[1]
+end
+
+
+function extractFeatures(tlogDatArray::Array{DataFrame}; filterParams::FilterParams=FilterParams(), terrainElev::Array{DataArray}=Array(DataArray[],1))
 	# This function extracts a set of "features" from the raw tlog data.  The set is currently large because
 	# I don't know which features I'l lend up using.
 
@@ -218,44 +282,109 @@ function extractFeatures(tlogDatArray::Array{DataFrame}; filterParams::FilterPar
 
 		# Create range feature:
 		x,y = convertLL2XY(lat,lon)
-		rangeFeature = sqrt(x.^2+y.^2)
-		featureMat[:range] = DataArray(rangeFeature)
+		#rangeFeature = sqrt(x.^2+y.^2)
+		featureMat[:range] = DataArray(sqrt(x.^2+y.^2))[1:end-1]
 
 		# Create velocity feature:
-		featureMat[:vel] = DataArray(vel)
+		featureMat[:vel] = DataArray(vel)[1:end-1]
 
 		# Create bearing from origin feature (CW from North in degrees)
-		featureMat[:bearing] = 180/pi * DataArray(atan2(x,y))
+		bearingFeature = 180/pi * DataArray(atan2(x,y))
+		featureMat[:bearing] = bearingFeature[1:end-1]
 
 		# Create radial-relative heading (directly away from origin is zero, directly to origin is 180, perpendicular to radius is +-90 deg)
-		featureMat[:heading] = 180/pi * DataArray(atan2(vx,vy))
-		featureMat[:rrHeading] = featureMat[:heading]-featureMat[:bearing]
+		headingFeature = 180/pi * DataArray(atan2(vx,vy))
+		featureMat[:heading] = headingFeature[1:end-1]
+		rrHeadingFeature = mod(headingFeature-bearingFeature + 360, 360)
+		featureMat[:rrHeading] = rrHeadingFeature[1:end-1]
 
 		# Create acceleration feature using central difference:
-		featureMat[:vdot] = DataArray(getDeriv(vel, timeHist, n=1, k=1))
+		featureMat[:vdot] = DataArray(getDeriv(vel, timeHist, n=1, k=1))[1:end-1]
 
 		# Create radial-relative heading rate feature vector:
-		featureMat[:rrHeaddot] = DataArray(getDeriv(convert(Array,featureMat[:rrHeading]), timeHist, n=1, k=1))
+		rrHeaddotFeature = DataArray(getDeriv(convert(Array,rrHeadingFeature), timeHist, n=1, k=1))
+		featureMat[:rrHeaddot] = rrHeaddotFeature[1:end-1]
 
 		# Create altitude feature (currently MSL altitude, which isn't good)
-		featureMat[:alt] = DataArray(alt)
+		featureMat[:alt] = DataArray(alt)[1:end-1]
+
+		# Create altitude above ground level feature 
+		featureMat[:altAGL] = featureMat[:alt] .- terrainElev
 
 		# Create altitude rate feature (currently MSL altitude, which isn't good)
-		featureMat[:altdot] = DataArray(getDeriv(alt, timeHist, n=1, k=1))
+		altdotFeature = DataArray(getDeriv(alt, timeHist, n=1, k=1))
+		featureMat[:altdot] = altdotFeature[1:end-1]
 
 		# Create a velocity feature based on the positions and time stamps, not the reported velocity (I fear the reported velocity may be inconsistent with the position updates...)
 		dx = diff(x)
 		dy = diff(y)
 		dxy = cumsum([0; sqrt(dx.^2+dy.^2)])
-		featureMat[:dxdt] = DataArray(getDeriv(dxy, timeHist, n=1, k=1) * 3600/6071)
+		dxdtFeature =  DataArray(getDeriv(dxy, timeHist, n=1, k=1) * 3600/6071)
+		featureMat[:dxdt] = dxdtFeature[1:end-1]
+		
+		# Get the acceleration based on position estimates:
+		d2xdt2Feature = DataArray(getDeriv(dxdtFeature, timeHist, n=1, k=1)) 
+		featureMat[:d2xdt2] = d2xdt2Feature[1:end-1]   # Acceleration will be in knots per second (nmi/hour/sec)
 
 		# Since I'm calculating the path distance to get velocity anyway, might as well record it (unless it takes up too much space)
-		featureMat[:pathDist] = DataArray(dxy)
+		featureMat[:pathDist] = DataArray(dxy)[1:end-1]
+
+		# Now get the three next time step features, altdot_t+1, d2xdt2_t+1, rrHeadDot_t+1
+		featureMat[:altdot_tp1] = altdotFeature[2:end]
+		featureMat[:d2xdt2_tp1] = d2xdt2Feature[2:end] 
+		featureMat[:rrHeaddot_tp1] = rrHeaddotFeature[2:end]
+
 
 		featureArray[i] = featureMat
 	end
 
 	return featureArray
+
+end
+
+function addAccel2Features!(featureArray::DataFrame; filterParams::FilterParams=FilterParams())
+	# This operates directly on the featureArray data frame.  Terrain does'nt work this way because you need the track information to get elevations, which isn't in the features.
+
+	#if !in(:d2xdt2,names(featureArray))
+		featureArray[:d2xdt2] = zeros(Float64,size(featureArray,1))
+		flIds = unique(featureArray[:FlightNum])
+
+		for i=1:length(flIds)
+			inds = find(featureArray[:,:FlightNum].==flIds[i])
+			dxdt = convert(Array,featureArray[inds,:dxdt])
+			featureArray[inds,:d2xdt2] = DataArray(getDeriv(dxdt, [0.; cumsum(filterParams.tInterval*ones(Float64,length(dxdt)))], n=1, k=1))
+		end
+	#end
+
+	# return featureArray
+end
+
+function addTerrain2JLD(; readPath::AbstractString="./", writePath::AbstractString=readPath, elevMethod::AbstractString="centroid", 
+						  jldSaveNameBase::AbstractString="agl", VERBOSE::Bool=false)
+	# This function is necessary to add terrain data to jld files generated without it.  After about 12/29/15, TLogProcess() should
+	# automatically add terrain elevation to the jld files as a new column in tlogDatInterp.
+
+	fileList = readdir(readPath)
+	inputFileName = AbstractString{}
+	n = length(fileList)
+
+	for i=1:n
+		if length(fileList[i])>4
+	 		if fileList[i][end-2:end] == "jld"	 			
+	 			inputFileName = fileList[i][1:end-4]
+	 			jldSaveName = string(jldSaveNameBase, inputFileName, ".jld")
+	 			tlogDatInterp, filterParams, terrainElev = loadTLog(string(readPath,fileList[i]), VERBOSE=VERBOSE)
+
+	 			terrainElev = getTerrainElevation(tlogDatInterp[:,symbol(filterParams.latStr)], tlogDatInterp[:,symbol(filterParams.lonStr)], elevMethod="centroid")
+
+	 			JLD.save(string(writePath,jldSaveName), "tlogDatInterp", tlogDatInterp, "filterParams", filterParams, "terrainElev", terrainElev)
+	 			if VERBOSE
+		 			display("Added terrain elevation to jld file $i/$n: $(fileList[i]). Wrote to $(string(writePath,jldSaveName)), elevation = $terrainElev")
+		 		end
+	 		end
+	 	end
+	 end	
+
 
 end
 
@@ -275,7 +404,14 @@ function tlogFolder2csv(;readPath::AbstractString="./", writeFile::AbstractStrin
 	 			if VERBOSE
 		 			display("Loading jld file $(fileList[i]) and writing to $(string(writeFile,outputType))")
 				end
-				tlogDatInterp, FilterParams = loadTLog(string(readPath,fileList[i]), VERBOSE=VERBOSE)
+				tlogDatInterp, filterParams, terrainElev = loadTLog(string(readPath,fileList[i]), VERBOSE=VERBOSE)
+				if !isempty(terrainElev)
+					if length(terrainElev)>1
+						tlogDatInterp[:,symbol("terrainElev")] = terrainElev
+					else
+						tlogDatInterp[:,symbol("terrainElev")] = terrainElev*ones(Float64, size(tlogDatInterp,1))
+					end
+				end
 				tlogDatInterp[:,symbol("FlightNum")] = ind*ones(Int64, size(tlogDatInterp,1))
 				ind += 1
 				namestlog = names(tlogDatInterp)
@@ -319,17 +455,34 @@ function featureFolder2csv(;readPath::AbstractString="./", writeFile::AbstractSt
 	 			if VERBOSE
 		 			display("Loading jld file $i/$n: $(fileList[i]). Writing to $(string(writeFile,outputType))")
 				end
-				tlogDatInterp, filterParams = loadTLog(string(readPath,fileList[i]), VERBOSE=VERBOSE)
-				features = extractFeatures(tlogDatInterp, filterParams=filterParams)
+				tlogDatInterp, filterParams, terrainElev = loadTLog(string(readPath,fileList[i]), VERBOSE=VERBOSE)
+				# The following isn't necessary because the tlogDatINterp variable will never be written out.  So we can just pass terrainElev directly to extract features
+				# if !isempty(terrainElev)
+				# 	if length(terrainElev)>1
+				# 		tlogDatInterp[:,symbol("terrainElev")] = terrainElev
+				# 	else
+				# 		tlogDatInterp[:,symbol("terrainElev")] = terrainElev*ones(Float64, size(tlogDatInterp,1))
+				# 	end
+				# end
+				features = extractFeatures(tlogDatInterp, filterParams=filterParams, terrainElev=terrainElev)
 				features[:,symbol("FlightNum")] = ind*ones(Int64, size(features,1))
 				ind += 1
 				namestlog = names(features)
+
+				# Check to make sure we're not going to overwrite a CSV file that may have been started before (i.e. it already exists):
+				if firstJLD
+					firstJLD=false
+				end
 
 				# Need to include a header only in the first call to write table.  Should also check to make sure the names are all the same:
 				if firstJLD
 					firstJLD = false
 					firstNames = namestlog
-					writetable(string(writeFile,outputType),features,append=false,header=true)
+					if isfile(string(writeFile,outputType))
+						writetable(string(writeFile,outputType),features,append=true,header=false)
+					else
+						writetable(string(writeFile,outputType),features,append=false,header=true)
+					end
 				else
 					# Check whether the names match the first names (will continue, however):
 					if any(namestlog.!=firstNames)
@@ -347,13 +500,120 @@ function featureFolder2csv(;readPath::AbstractString="./", writeFile::AbstractSt
 	return 0
 end
 
-function binFeatures(dataFile::AbstractString)
-	tf = readtable(dataFile, header=true)
-	outbins = binFeatures(tf)
+function getTerrainElevation(lat::Float64, lon::Float64; elevMethod::AbstractString="centroid")
 
-	# Do something with the bins?
+	return getTerrainElevation([lat], [lon], elevMethod="first")[1]   # Since there's only one point, just use that rather than whatever the user entered.
 
 end
+
+function getTerrainElevation(lat::Array{Float64}, lon::Array{Float64}; elevMethod::AbstractString="centroid")
+
+	return convert(Array, getTerrainElevation(DataArray(lat), DataArray(lon), elevMethod=elevMethod))
+
+end
+
+function getTerrainElevation(latArr::DataArray{Float64}, lonArr::DataArray{Float64}; elevMethod::AbstractString="centroid")
+
+	lat=0.
+	lon=0.
+	terrainElev = Float64[]
+
+	if (elevMethod=="first") | (elevMethod=="centroid")
+		terrainElev = Array(Float64,1)
+	end
+
+	if elevMethod=="all"
+		terrainElev = Array(Float64,length(lonArr))
+	end
+
+	for i=1:length(terrainElev)
+		if elevMethod=="first"
+			lat = latArr[1]
+			lon = lonArr[1]
+		end
+
+		if elevMethod=="centroid"
+			lat = mean(latArr)
+			lon = mean(lonArr)
+		end
+
+		if elevMethod=="all"
+			lat = latArr[i]
+			lon = lonArr[i]
+		end
+
+		query=Dict("x" => string(lon), "y" => string(lat), "units" => "Feet", "output" => "xml")
+		urlResp = get("http://ned.usgs.gov/epqs/pqs.php", query=query)
+
+		dataPacket = readall(urlResp)
+		startPoint = search(dataPacket, "<Elevation>")[1]+length("<Elevation>")
+		endPoint = search(dataPacket, "</Elevation>")[1]-1
+		terrainElev[i] = parse(Float64, dataPacket[startPoint:endPoint])
+		if terrainElev[i]==-1.0e6
+			terrainElev[i]= NaN
+		end 
+	end
+
+	return DataArray(terrainElev)
+
+end
+
+# function featureFolderMSL2AGL(;readPath::AbstractString="./", writeFile::AbstractString="./featureHistory", outputType::AbstractString=".csv", 
+# 							   VERBOSE::Bool=false, elevMethod::AbstractString="centroid")
+# 	# Will convert the altitudes in the jld files to AGL and write out a CSV file with all the data. Same as featureFolder2csv, but includes the MSL->AGL conversion
+
+# 	tlogDatArray = DataFrame[]
+# 	fParamArray = FilterParams[]
+# 	fileList = readdir(readPath)
+# 	firstJLD = true
+# 	firstNames = Symbol[]
+# 	ind = 1
+# 	n = length(fileList)
+
+# 	for i=1:n
+# 		if length(fileList[i])>5
+# 	 		if (fileList[i][end-2:end] == "jld")
+# 	 			if VERBOSE
+# 		 			display("Loading jld file $i/$n: $(fileList[i]). Writing to $(string(writeFile,outputType))")
+# 				end
+# 				tlogDatInterp, filterParams = loadTLog(string(readPath,fileList[i]), VERBOSE=VERBOSE)
+
+				
+
+# 				features = extractFeatures(tlogDatInterp, filterParams=filterParams)
+# 				features[:,symbol("FlightNum")] = ind*ones(Int64, size(features,1))
+# 				ind += 1
+# 				namestlog = names(features)
+
+# 				# Need to include a header only in the first call to write table.  Should also check to make sure the names are all the same:
+# 				if firstJLD
+# 					firstJLD = false
+# 					firstNames = namestlog
+# 					writetable(string(writeFile,outputType),features,append=false,header=true)
+# 				else
+# 					# Check whether the names match the first names (will continue, however):
+# 					if any(namestlog.!=firstNames)
+# 						display("Warning, the names in file $(fileList[i]) don't match the names in the original output file:")
+# 						display("Names in original file: $firstNames")
+# 						display("Names in $(fileList[i]): $namestlog")
+# 					end
+# 					writetable(string(writeFile,outputType),features,append=true,header=false)
+# 				end
+
+# 			end
+# 		end
+# 	end
+
+# 	return 0
+# end
+
+# function binFeatures(dataFile::AbstractString)
+# 	tf = readtable(dataFile, header=true)
+# 	outbins = binFeatures(tf)
+
+# 	# Do something with the bins?
+
+# end
 
 function getAutoBinEdges(datArray::DataArray; numBins::Int64=6)
 # Returns a set of bin edges based on the bin count and the same number of entries being in each bin.
@@ -458,10 +718,6 @@ function convertFeature2Bin!(feat::DataFrame, indMat::DataFrame; binSymArray::Ar
 	
 	#indMat = DataFrame(Int8, length(binSymArray))
 
-	# May want to do this en masse in the calling function instead
-	feat[:rrHeading] = mod(feat[:rrHeading]+360,360);
-
-
 	for symind = 1:length(binSymArray)
 		bins=getHardCodedEdges(binSymArray[symind])
 		j=2
@@ -538,51 +794,51 @@ function binFeatures(datArray::DataFrame; datNames::Array{Symbol}=names(datArray
 
 end
 
-function binFeatures()
-# Eventually will need to bin the features (a la histograms) to predict probabilities of transitions, but not sure how this will work.
-# This could read in .jld files and build the bins one-by-one.
+# function binFeatures()
+# # Eventually will need to bin the features (a la histograms) to predict probabilities of transitions, but not sure how this will work.
+# # This could read in .jld files and build the bins one-by-one.
 
-	tlogDatArray = DataFrame[]
-	fParamArray = FilterParams[]
-	fileList = readdir(readPath)
-	firstJLD = true
-	firstNames = Symbol[]
-	ind = 1
-	n = length(fileList)
+# 	tlogDatArray = DataFrame[]
+# 	fParamArray = FilterParams[]
+# 	fileList = readdir(readPath)
+# 	firstJLD = true
+# 	firstNames = Symbol[]
+# 	ind = 1
+# 	n = length(fileList)
 
-	for i=1:n
-		if length(fileList[i])>5
-	 		if (fileList[i][end-2:end] == "jld")
-	 			if VERBOSE
-		 			display("Loading jld file $i/$n: $(fileList[i]). Writing to $(string(writeFile,outputType))")
-				end
-				tlogDatInterp, filterParams = loadTLog(string(readPath,fileList[i]), VERBOSE=VERBOSE)
-				features = extractFeatures(tlogDatInterp, filterParams=filterParams)
-				features[:,symbol("FlightNum")] = ind*ones(Int64, size(features,1))
-				ind += 1
-				namestlog = names(features)
+# 	for i=1:n
+# 		if length(fileList[i])>5
+# 	 		if (fileList[i][end-2:end] == "jld")
+# 	 			if VERBOSE
+# 		 			display("Loading jld file $i/$n: $(fileList[i]). Writing to $(string(writeFile,outputType))")
+# 				end
+# 				tlogDatInterp, filterParams = loadTLog(string(readPath,fileList[i]), VERBOSE=VERBOSE)
+# 				features = extractFeatures(tlogDatInterp, filterParams=filterParams)
+# 				features[:,symbol("FlightNum")] = ind*ones(Int64, size(features,1))
+# 				ind += 1
+# 				namestlog = names(features)
 
-				# Need to include a header only in the first call to write table.  Should also check to make sure the names are all the same:
-				if firstJLD
-					firstJLD = false
-					firstNames = namestlog
-					writetable(string(writeFile,outputType),features,append=false,header=true)
-				else
-					# Check whether the names match the first names (will continue, however):
-					if any(namestlog.!=firstNames)
-						display("Warning, the names in file $(fileList[i]) don't match the names in the original output file:")
-						display("Names in original file: $firstNames")
-						display("Names in $(fileList[i]): $namestlog")
-					end
-					writetable(string(writeFile,outputType),features,append=true,header=false)
-				end
+# 				# Need to include a header only in the first call to write table.  Should also check to make sure the names are all the same:
+# 				if firstJLD
+# 					firstJLD = false
+# 					firstNames = namestlog
+# 					writetable(string(writeFile,outputType),features,append=false,header=true)
+# 				else
+# 					# Check whether the names match the first names (will continue, however):
+# 					if any(namestlog.!=firstNames)
+# 						display("Warning, the names in file $(fileList[i]) don't match the names in the original output file:")
+# 						display("Names in original file: $firstNames")
+# 						display("Names in $(fileList[i]): $namestlog")
+# 					end
+# 					writetable(string(writeFile,outputType),features,append=true,header=false)
+# 				end
 
-			end
-		end
-	end
+# 			end
+# 		end
+# 	end
 
-	return 0
-end
+# 	return 0
+# end
 
 function getDeriv(vals::Array{Float64}, t::Array{Float64}; n::Int64=1, k::Int64=1)
 # Returns the kth derivative of vals using n points left and right of the current point
@@ -611,14 +867,31 @@ function loadTLog(readFile::AbstractString; VERBOSE::Bool=false)
 
 	tlogDatInterp = DataFrame[]
 	filterParams = FilterParams()
+	terrainElev = Float64[]
 
 	if length(readFile)>5
  		if (readFile[end-2:end] == "jld")
  			try
-	 			tlogDatInterp, filterParams = load(readFile, "tlogDatInterp", "filterParams")
+	 			tlogDict = load(readFile)
+
+	 			if length(tlogDict)==2
+	 				# This is an older version with only tlogDatInterp and filterParams:
+		 			tlogDatInterp = tlogDict["tlogDatInterp"]
+		 			filterParams = tlogDict["filterParams"]
+		 			if VERBOSE
+		 				display("Received only tlog data and filter parameters, no terrain elevation data")
+		 			end
+		 		elseif length(tlogDict)==3
+		 			tlogDatInterp = tlogDict["tlogDatInterp"]
+		 			filterParams = tlogDict["filterParams"]
+		 			terrainElev = tlogDict["terrainElev"]
+		 			if VERBOSE
+		 				display("Received tlog data, filter parameters and terrain elevation data")
+		 			end
+		 		end
 	 		catch
 	 			if VERBOSE
-	 				display("Error reading file $readFile, does not contain tlog data or filter parameters.")
+	 				display("Error reading file $readFile.")
 	 			end
 	 			# do nothing if error
 	 		end
@@ -629,7 +902,7 @@ function loadTLog(readFile::AbstractString; VERBOSE::Bool=false)
 	 	end
 	 end
 
-	 return tlogDatInterp, filterParams
+	 return tlogDatInterp, filterParams, terrainElev
 
 end
 
@@ -669,8 +942,8 @@ function processTLog(;readpath::AbstractString="./", writepath::AbstractString="
 # be the locations the .tlog files are moved to when they have been processed into .jld files.
 # If empty then the tlog files will not be moved.  Similarly with failPath, if not empty the
 # files that failed to convert will be moved to this directory.
-# tlogDatArray, udArray, timeKey = processTLog();
-# tlogDatArray, udArray, timeKey = processTLog(readpath="./", writepath="./", createTextLogs=false, jldSaveNameBase="tlogData", fieldMatchFile="FieldMatchFile.txt", VERBOSE=false, timeKey="time_unix_usec_._mavlink_system_time_t",successPath="", failPath="");
+# tlogDatArray, successParses, failParses = processTLog();
+# tlogDatArray, successParses, failParses = processTLog(readpath="./", writepath="./", createTextLogs=false, jldSaveNameBase="tlogData", fieldMatchFile="FieldMatchFile.txt", VERBOSE=false, timeKey="time_unix_usec_._mavlink_system_time_t",successPath="", failPath="");
 
 	outFileName = string(writepath,"templog.txt")
 	tlogDatArray = DataFrame[]
@@ -678,6 +951,8 @@ function processTLog(;readpath::AbstractString="./", writepath::AbstractString="
 	fileList = readdir(readpath)
 	unitDict = getUnitConversions()
 	inputFileName = AbstractString{}
+	successParses = 0
+	failParses = 0
 
 	for i=1:length(fileList)
 		if length(fileList[i])>5
@@ -685,7 +960,7 @@ function processTLog(;readpath::AbstractString="./", writepath::AbstractString="
 	 			inputFileName = fileList[i][1:end-5]
 	 			parseSuccess = false
 	 			if VERBOSE
-			 		display("Found tlog file: $(fileList[i])")
+			 		display("Found tlog file $i/$(length(fileList)): $(fileList[i])")
 			 	end
 		 		if createTextLogs
 		 			outFileName = string(writepath, fileList[i][1:end-5], ".txt")
@@ -757,15 +1032,20 @@ function processTLog(;readpath::AbstractString="./", writepath::AbstractString="
 											push!(udArray,ud)
 										end
 
+										# This is being stored as a separate variable because it may be NaN for a significant proportion 
+									    # of the flights (60% are outside U.S.), and I don't want that to create a data frame in tlogDatInterp
+									    # that has a lot of NaNs.
+										terrainElev = getTerrainElevation(tlogDatInterp[:,symbol(filterParams.latStr)], tlogDatInterp[:,symbol(filterParams.lonStr)], elevMethod="centroid")
+
 										# The jld files are quite large, four tlog files totaled 2.4 MB in .jld, so I'll save them individually.
 										jldSaveName = string(jldSaveNameBase, inputFileName, ".jld")
-										@save string(writepath,jldSaveName) tlogDatInterp filterParams
+										@save string(writepath,jldSaveName) tlogDatInterp filterParams terrainElev
 										parseSuccess = true
 										if !isempty(successPath)
 											if VERBOSE
 												display("Successfully processed file $(fileList[i]). Moving file to $(string(successPath, fileList[i])) and saving in $(string(writepath,jldSaveName)).")
 											end
-											mv(fileList[i], string(successPath, fileList[i]), remove_destination=true)
+											mv(string(readpath, fileList[i]), string(successPath, fileList[i]), remove_destination=true)
 										end
 									end
 								end
@@ -774,11 +1054,17 @@ function processTLog(;readpath::AbstractString="./", writepath::AbstractString="
 					end
 				end
 
+				if parseSuccess
+					successParses += 1
+				else
+					failParses += 1
+				end
+
 				if (!parseSuccess) & (!isempty(failPath))
 					if VERBOSE
 						display("Failed to process file $(fileList[i]). Moving file to $(string(failPath, fileList[i])).")
 					end
-					mv(fileList[i], string(failPath, fileList[i]), remove_destination=true)
+					mv(string(readpath, fileList[i]), string(failPath, fileList[i]), remove_destination=true)
 				end
 				toc()
 		 	end
@@ -786,12 +1072,12 @@ function processTLog(;readpath::AbstractString="./", writepath::AbstractString="
 	end
 
 	# When we're done processing tlog files, if we're not to create text logs then delete the templog file:
-	if !createTextLogs
+	if (!createTextLogs) && (isfile(outFileName))
 		run(`rm $outFileName`)
 	end
 
 
-	return tlogDatArray, udArray, timeKey
+	return tlogDatArray, successParses, failParses
 
 end
 
@@ -889,6 +1175,18 @@ end
 function removeTimeOutliers(datArray::DataFrame; filterParams::FilterParams=FilterParams(), VERBOSE::Bool=false)
 	# Check for outliers in the time stamps.  Need to do this after removing nans so we don't get nan as the answer here:
 	ts = datArray[:,symbol(filterParams.timeStr)].-datArray[1,symbol(filterParams.timeStr)]
+
+	# We sometimes get wild discrepancies in the time stamps, like a time thats 1e9 seconds from the starting time.  So I'll remove those 
+	# time stamps that are wildly different from the first, like 1e6 away (no flight is going to be 11+ days long on drone share...).  
+	# This is necessary because the standard deviation check could be fooled if we have these data points (because the standard deviation 
+	# will be so large)
+	goodInds = collect(1:size(datArray,1))
+	outlierInds = find(abs(ts).>1e6)
+	deleteat!(goodInds,outlierInds)
+	datArray = datArray[goodInds, :] 
+	ts = datArray[:,symbol(filterParams.timeStr)].-datArray[1,symbol(filterParams.timeStr)]
+
+	# Now do the check for single outliers:
 	zts, maxInd = findmax((ts.-mean(ts))/std(ts))
 	while zts > 5.0
 		# In a roughly sequential list of numbers starting at 0, the largest element will have a z-value of about 1.79
