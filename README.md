@@ -9,7 +9,7 @@ readpath and writepath are simply the places you'd like to read tlogs from and w
 
 The outputs of TLogProcessor are the array of data tables (one entry per .tlog file, as long as there are fewer than 100 files, otherwise it will be empty), an array of the unique identifiers pulled out of each tlog file (this can be used to index into the data tables without worrying about figuring out the column numbers), and the timekey used to align all the data into bins.
 
-The batch processor relys on calls to the C# programe TLogReader.exe (or, in some cases, TLogReaderV5.exe), which converts the tlog file into a text file. If you build the program with a different name you can specify the batch processing executable in the string parameter tlogParseExe. The usage for that program is:
+The batch processor relys on calls to the C# program TLogReader.exe (or, in some cases, TLogReaderV5.exe), which converts the tlog file into a text file. If you build the program with a different name you can specify the batch processing executable in the string parameter tlogParseExe. The usage for that program is:
 
 \>\> TLogReader.exe inputfile.tlog [outputfile.txt] [verbose: true/false] [FieldMatchFile.txt]
 
